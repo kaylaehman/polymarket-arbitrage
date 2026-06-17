@@ -131,6 +131,16 @@ class IntelligenceConfig:
 
 
 @dataclass
+class DatabaseConfig:
+    """Signal database (SQLite) config. Append-only persistence (FEAT-09)."""
+    enabled: bool = False
+    path: str = "data/signals.db"
+    log_signals: bool = True
+    log_opportunities: bool = True
+    auto_log_outcomes: bool = True   # poll for resolutions (background poller TBD)
+
+
+@dataclass
 class BotConfig:
     """Complete bot configuration."""
     api: ApiConfig = field(default_factory=ApiConfig)
@@ -140,6 +150,7 @@ class BotConfig:
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     monitoring: MonitoringConfig = field(default_factory=MonitoringConfig)
     intelligence: IntelligenceConfig = field(default_factory=IntelligenceConfig)
+    database: DatabaseConfig = field(default_factory=DatabaseConfig)
     
     @property
     def is_dry_run(self) -> bool:
@@ -190,6 +201,7 @@ def load_config(config_path: str = "config.yaml") -> BotConfig:
     logging_data = raw_config.get("logging", {})
     monitoring_data = raw_config.get("monitoring", {})
     intelligence_data = raw_config.get("intelligence", {}) or {}
+    database_data = raw_config.get("database", {}) or {}
     
     # Handle environment variable overrides
     api_data = _apply_env_overrides(api_data, {
@@ -208,6 +220,7 @@ def load_config(config_path: str = "config.yaml") -> BotConfig:
         logging=_build_dataclass(LoggingConfig, logging_data),
         monitoring=_build_dataclass(MonitoringConfig, monitoring_data),
         intelligence=_build_intelligence_config(intelligence_data),
+        database=_build_dataclass(DatabaseConfig, database_data),
     )
     
     # Validate

@@ -140,3 +140,13 @@ intelligence:
     max_tokens: 512
     timeout_seconds: 8        # Skip the signal and continue if Claude is slower
 
+# ── Signal Database (SQLite, append-only) ─────────────────────────────────────
+# Persists signals + opportunities so AI calibration can be measured over time.
+# Foundation for Kelly sizing (FEAT-05) and the backtester (FEAT-10).
+database:
+  enabled: false             # Set true to record signals/opportunities to SQLite
+  path: "data/signals.db"
+  log_signals: true
+  log_opportunities: true
+  auto_log_outcomes: true    # Poll Gamma API for resolutions (poller is TBD)
+

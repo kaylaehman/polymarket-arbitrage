@@ -56,6 +56,9 @@ class TradingBot:
         # Intelligence layer (optional, annotate-only)
         self.intelligence_engine = None
 
+        # Signal database (optional, append-only persistence)
+        self.signal_db = None
+
         # Statistics
         self._start_time: Optional[datetime] = None
         self._update_count = 0
@@ -144,6 +147,16 @@ class TradingBot:
             logger.warning(f"[Intelligence] init failed, continuing without: {e}")
             self.intelligence_engine = None
 
+        # Initialize signal database (optional; append-only persistence)
+        if self.config.database.enabled:
+            try:
+                from utils.signal_db import SignalDB
+                self.signal_db = SignalDB(db_path=self.config.database.path)
+                logger.info(f"[SignalDB] Logging to {self.config.database.path}")
+            except Exception as e:
+                logger.warning(f"[SignalDB] init failed, continuing without: {e}")
+                self.signal_db = None
+
         # Initialize data feed
         market_ids = self.config.trading.markets.copy()
         self.data_feed = DataFeed(
@@ -214,10 +227,24 @@ class TradingBot:
                             f"[Intelligence] (annotate-only) would filter "
                             f"{signal.market_id} — proceeding anyway"
                         )
+                self._persist_to_db(summary, opp)
         except Exception as e:
             logger.warning(f"[Intelligence] annotate failed for {signal.market_id}: {e}")
 
         await self.execution_engine.submit_signal(signal)
+
+    def _persist_to_db(self, summary, opp) -> None:
+        """Append the signal + opportunity to the SQLite store, if enabled."""
+        if self.signal_db is None:
+            return
+        try:
+            signal_id = None
+            if summary.signal is not None and self.config.database.log_signals:
+                signal_id = self.signal_db.log_signal(summary.signal, platform="polymarket")
+            if self.config.database.log_opportunities:
+                self.signal_db.log_opportunity(opp, signal_id=signal_id)
+        except Exception as e:
+            logger.warning(f"[SignalDB] failed to persist {opp.market_id}: {e}")
 
     @staticmethod
     def _yes_price_from_book(order_book) -> float:
@@ -306,7 +333,10 @@ class TradingBot:
         
         if self.client:
             await self.client.disconnect()
-        
+
+        if self.signal_db:
+            self.signal_db.close()
+
         # Final summary
         if self.portfolio:
             summary = self.portfolio.get_summary()
