@@ -101,6 +101,36 @@ class MonitoringConfig:
 
 
 @dataclass
+class IntelligenceNewsConfig:
+    """News-fetching sub-config for the intelligence layer."""
+    lookback_hours: int = 4
+    max_articles: int = 5
+    cache_ttl_minutes: int = 10
+    sources: list = field(default_factory=list)
+
+
+@dataclass
+class IntelligenceClaudeConfig:
+    """Claude sub-config for the intelligence layer."""
+    model: str = "claude-sonnet-4-6"
+    max_tokens: int = 512
+    timeout_seconds: int = 8
+
+
+@dataclass
+class IntelligenceConfig:
+    """AI news-intelligence layer config. Disabled by default (additive)."""
+    enabled: bool = False
+    mode: str = "filter"            # "filter" | "boost" | "both"
+    min_confidence: float = 0.65
+    min_edge_boost: float = 0.03
+    min_edge_filter: float = 0.10   # adverse gap size before an arb is filtered
+    max_position_boost: float = 10.0
+    news: IntelligenceNewsConfig = field(default_factory=IntelligenceNewsConfig)
+    claude: IntelligenceClaudeConfig = field(default_factory=IntelligenceClaudeConfig)
+
+
+@dataclass
 class BotConfig:
     """Complete bot configuration."""
     api: ApiConfig = field(default_factory=ApiConfig)
@@ -109,6 +139,7 @@ class BotConfig:
     mode: ModeConfig = field(default_factory=ModeConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     monitoring: MonitoringConfig = field(default_factory=MonitoringConfig)
+    intelligence: IntelligenceConfig = field(default_factory=IntelligenceConfig)
     
     @property
     def is_dry_run(self) -> bool:
@@ -158,6 +189,7 @@ def load_config(config_path: str = "config.yaml") -> BotConfig:
     mode_data = raw_config.get("mode", {})
     logging_data = raw_config.get("logging", {})
     monitoring_data = raw_config.get("monitoring", {})
+    intelligence_data = raw_config.get("intelligence", {}) or {}
     
     # Handle environment variable overrides
     api_data = _apply_env_overrides(api_data, {
@@ -175,6 +207,7 @@ def load_config(config_path: str = "config.yaml") -> BotConfig:
         mode=_build_dataclass(ModeConfig, mode_data),
         logging=_build_dataclass(LoggingConfig, logging_data),
         monitoring=_build_dataclass(MonitoringConfig, monitoring_data),
+        intelligence=_build_intelligence_config(intelligence_data),
     )
     
     # Validate
@@ -196,10 +229,22 @@ def _apply_env_overrides(data: dict, env_map: dict[str, str]) -> dict:
 def _build_dataclass(cls, data: dict):
     """Build a dataclass from a dictionary, ignoring unknown keys."""
     import dataclasses
-    
+
     field_names = {f.name for f in dataclasses.fields(cls)}
     filtered_data = {k: v for k, v in data.items() if k in field_names}
     return cls(**filtered_data)
+
+
+def _build_intelligence_config(data: dict) -> IntelligenceConfig:
+    """Build the nested IntelligenceConfig (with news/claude sub-objects).
+
+    Missing keys and a missing section both fall back to defaults, so existing
+    configs without an ``intelligence:`` block still parse cleanly.
+    """
+    news = _build_dataclass(IntelligenceNewsConfig, data.get("news", {}) or {})
+    claude = _build_dataclass(IntelligenceClaudeConfig, data.get("claude", {}) or {})
+    top = {k: v for k, v in data.items() if k not in ("news", "claude")}
+    return _build_dataclass(IntelligenceConfig, {**top, "news": news, "claude": claude})
 
 
 def _validate_config(config: BotConfig) -> None:

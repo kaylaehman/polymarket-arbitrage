@@ -108,11 +108,35 @@ logging:
 monitoring:
   # Portfolio snapshot interval (seconds)
   snapshot_interval: 60
-  
+
   # Heartbeat interval (seconds)
   heartbeat_interval: 30
-  
+
   # Performance metrics
   track_latency: true
   track_fill_rates: true
+
+# ── Intelligence Layer ────────────────────────────────────────────────────────
+# AI news-reading layer. Disabled by default — the bot runs fully without it.
+# When enabled, set NEWSAPI_KEY and ANTHROPIC_API_KEY (and optionally
+# ANTHROPIC_BASE_URL for the OpenClaw proxy) as environment variables.
+# Phase 2 is "annotate-only": signals are attached/logged, never block a trade.
+intelligence:
+  enabled: false              # Set true once NEWSAPI_KEY and ANTHROPIC_API_KEY are set
+  mode: "filter"              # "filter" | "boost" | "both"
+  min_confidence: 0.65        # AI confidence threshold to act on a signal
+  min_edge_boost: 0.03        # Divergence above which a signal flags a boost
+  min_edge_filter: 0.10       # Adverse divergence above which it would filter an arb
+  max_position_boost: 10      # Max $ per AI-boosted directional position
+
+  news:
+    lookback_hours: 4         # How far back to fetch news (max 24 for free tier)
+    max_articles: 5           # Articles sent to Claude per market
+    cache_ttl_minutes: 10     # Don't re-fetch news for same topic within this window
+    sources: []               # Empty = NewsAPI defaults, or e.g. ["reuters", "bbc-news"]
+
+  claude:
+    model: "claude-sonnet-4-6"
+    max_tokens: 512
+    timeout_seconds: 8        # Skip the signal and continue if Claude is slower
 
