@@ -936,6 +936,39 @@ class PolymarketClient(BasePolymarketClient):
             logger.error(f"Failed to cancel order {order_id}: {e}")
             raise
     
+    async def get_order(self, order_id: str) -> dict:
+        """
+        Fetch one order's current fill state. Returns a normalized dict:
+        {"status": OrderStatus, "filled_size": float, "size": float}.
+        """
+        if self.dry_run:
+            o = self._simulated_orders.get(order_id)
+            if not o:
+                return {"status": OrderStatus.CANCELLED, "filled_size": 0.0, "size": 0.0}
+            return {"status": o.status, "filled_size": o.filled_size, "size": o.size}
+
+        if self._clob is None:
+            return {"status": OrderStatus.REJECTED, "filled_size": 0.0, "size": 0.0}
+        try:
+            data = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: self._clob.get_order(order_id)
+            ) or {}
+            size = float(data.get("original_size", data.get("size", 0)) or 0)
+            matched = float(data.get("size_matched", 0) or 0)
+            st = str(data.get("status", "")).upper()
+            status = {
+                "LIVE": OrderStatus.OPEN,
+                "MATCHED": OrderStatus.FILLED,
+                "CANCELED": OrderStatus.CANCELLED,
+                "DELAYED": OrderStatus.PENDING,
+            }.get(st, OrderStatus.OPEN)
+            if 0 < matched < size and status == OrderStatus.OPEN:
+                status = OrderStatus.PARTIALLY_FILLED
+            return {"status": status, "filled_size": matched, "size": size}
+        except Exception as e:
+            logger.warning(f"get_order({order_id}) failed: {e}")
+            return {"status": OrderStatus.OPEN, "filled_size": 0.0, "size": 0.0}
+
     async def cancel_all_orders(self, market_id: Optional[str] = None) -> int:
         """Cancel all open orders, optionally for a specific market."""
         orders = await self.get_open_orders(market_id)

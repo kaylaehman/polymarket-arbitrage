@@ -317,6 +317,32 @@ class KalshiClient:
             logger.error(f"Kalshi cancel_order failed for {order_id}: {e}")
             raise
 
+    async def get_order(self, order_id: str) -> dict:
+        """
+        Fetch one order's current fill state. Returns a normalized dict:
+        {"status": OrderStatus, "filled_size": float, "size": float}.
+        """
+        if self.dry_run:
+            o = self._simulated_orders.get(order_id)
+            if not o:
+                return {"status": OrderStatus.CANCELLED, "filled_size": 0.0, "size": 0.0}
+            return {"status": o.status, "filled_size": o.filled_size, "size": o.size}
+
+        data = await self._signed_request("GET", f"/portfolio/orders/{order_id}")
+        o = data.get("order", {})
+        count = float(o.get("count", 0) or 0)
+        remaining = float(o.get("remaining_count", count) or 0)
+        filled = max(0.0, count - remaining)
+        st = (o.get("status") or "").lower()
+        status = {
+            "resting": OrderStatus.OPEN,
+            "executed": OrderStatus.FILLED,
+            "canceled": OrderStatus.CANCELLED,
+        }.get(st, OrderStatus.OPEN)
+        if 0 < filled < count and status == OrderStatus.OPEN:
+            status = OrderStatus.PARTIALLY_FILLED
+        return {"status": status, "filled_size": filled, "size": count}
+
     async def get_balance(self) -> float:
         """Return the account cash balance in dollars (0.0 in dry-run)."""
         if self.dry_run:

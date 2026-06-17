@@ -47,14 +47,17 @@ class CrossExecConfig:
     min_size: int = 1                   # minimum shares/contracts per leg
     cooldown_seconds: float = 30.0      # per-pair re-execution cooldown
     unwind_slippage: float = 0.05       # price concession when unwinding a stuck leg
+    fill_timeout_seconds: float = 12.0  # how long to wait for a leg to fill
+    fill_poll_seconds: float = 1.0      # interval between fill-status polls
 
 
 @dataclass
 class CrossExecStats:
-    executed: int = 0          # both legs placed
+    executed: int = 0          # both legs filled in matched quantity
     skipped: int = 0           # cooldown / risk / disabled
-    partial_unwound: int = 0   # one leg placed, other failed, unwound ok
-    failed: int = 0            # one leg placed, unwind failed -> live exposure
+    reconciled: int = 0        # filled with a residual that was unwound ok
+    no_fill: int = 0           # nothing filled (orders cancelled, no exposure)
+    failed: int = 0            # residual could not be unwound -> live exposure
     errors: int = 0
 
 
@@ -176,51 +179,63 @@ class CrossPlatformExecutor:
 
         # --- live: place both legs concurrently ---
         logger.info(f"[LIVE] placing cross-platform arb: {plan}")
-        results = await asyncio.gather(
+        buy_res, hedge_res = await asyncio.gather(
             self._place_leg(buy_platform, buy_ident, buy_token, OrderSide.BUY, buy_price, size, "xplat_arb"),
             self._place_leg(hedge_platform, hedge_ident, hedge_token, OrderSide.BUY, hedge_price, size, "xplat_arb"),
             return_exceptions=True,
         )
-        buy_res, hedge_res = results
+        buy_placed = self._leg_ok(buy_res)
+        hedge_placed = self._leg_ok(hedge_res)
 
-        buy_ok = self._leg_ok(buy_res)
-        hedge_ok = self._leg_ok(hedge_res)
-
-        if buy_ok and hedge_ok:
-            self.stats.executed += 1
-            logger.info(f"[LIVE] cross-platform arb FILLED both legs: {plan}")
-            return CrossExecResult("executed", plan, size=size, notional=notional,
-                                   legs=[buy_res, hedge_res])
-
-        if not buy_ok and not hedge_ok:
+        if not buy_placed and not hedge_placed:
             self.stats.errors += 1
-            logger.error(f"[LIVE] cross-platform arb FAILED both legs: buy={buy_res} hedge={hedge_res}")
-            return CrossExecResult("error", "both legs failed", size=size, notional=notional)
+            logger.error(f"[LIVE] cross-platform arb FAILED to place both legs: buy={buy_res} hedge={hedge_res}")
+            return CrossExecResult("error", "both legs failed to place", size=size, notional=notional)
 
-        # exactly one leg landed -> we have one-sided exposure. Unwind it.
-        if buy_ok:
-            stuck_platform, stuck_ident, stuck_token, stuck_price = buy_platform, buy_ident, buy_token, buy_price
-            other_err = hedge_res
-        else:
-            stuck_platform, stuck_ident, stuck_token, stuck_price = hedge_platform, hedge_ident, hedge_token, hedge_price
-            other_err = buy_res
+        # --- reconcile on actual FILLS, not placement ---
+        # Wait for each placed leg's terminal fill state; cancel leftover resting size.
+        buy_filled = await self._await_fill(buy_platform, buy_res) if buy_placed else 0.0
+        hedge_filled = await self._await_fill(hedge_platform, hedge_res) if hedge_placed else 0.0
 
-        logger.warning(
-            f"[LIVE] cross-platform arb PARTIAL: filled {stuck_token.value} on "
-            f"{stuck_platform}, other leg failed ({other_err}). Unwinding."
+        matched = min(buy_filled, hedge_filled)
+        residual_buy = buy_filled - matched      # excess buy_token holdings to shed
+        residual_hedge = hedge_filled - matched  # excess hedge_token holdings to shed
+
+        logger.info(
+            f"[LIVE] fills: buy={buy_filled} hedge={hedge_filled} -> matched={matched}, "
+            f"residual buy={residual_buy} hedge={residual_hedge}"
         )
-        unwound = await self._unwind(stuck_platform, stuck_ident, stuck_token, stuck_price, size)
-        if unwound:
-            self.stats.partial_unwound += 1
-            return CrossExecResult("unwound", f"one leg filled then unwound; other failed: {other_err}",
+
+        if matched <= 0 and residual_buy <= 0 and residual_hedge <= 0:
+            self.stats.no_fill += 1
+            return CrossExecResult("no_fill", "nothing filled; orders cancelled (no exposure)",
                                    size=size, notional=notional)
-        self.stats.failed += 1
-        logger.error(
-            f"[NEEDS-ATTENTION] one-sided {stuck_token.value} position on {stuck_platform} "
-            f"({stuck_ident}) x{size} could NOT be unwound. Manual intervention required."
-        )
-        return CrossExecResult("exposed", f"UNWIND FAILED — open {stuck_token.value} on {stuck_platform}",
-                               size=size, notional=notional)
+
+        # Unwind any one-sided residual (we hold these shares, so SELL is valid).
+        exposed = []
+        if residual_buy > 0:
+            if not await self._unwind(buy_platform, buy_ident, buy_token, buy_price, residual_buy):
+                exposed.append(f"{int(residual_buy)} {buy_token.value} on {buy_platform}")
+        if residual_hedge > 0:
+            if not await self._unwind(hedge_platform, hedge_ident, hedge_token, hedge_price, residual_hedge):
+                exposed.append(f"{int(residual_hedge)} {hedge_token.value} on {hedge_platform}")
+
+        if exposed:
+            self.stats.failed += 1
+            logger.error(f"[NEEDS-ATTENTION] cross-platform residual could NOT be unwound: {'; '.join(exposed)}")
+            return CrossExecResult("exposed", f"UNWIND FAILED — open: {'; '.join(exposed)}",
+                                   size=int(matched), notional=matched * per_share_cost)
+
+        if residual_buy > 0 or residual_hedge > 0:
+            self.stats.reconciled += 1
+            logger.info(f"[LIVE] cross-platform arb reconciled: matched {int(matched)}, residual unwound")
+            return CrossExecResult("reconciled", f"matched {int(matched)}; residual unwound",
+                                   size=int(matched), notional=matched * per_share_cost)
+
+        self.stats.executed += 1
+        logger.info(f"[LIVE] cross-platform arb FILLED both legs matched x{int(matched)}")
+        return CrossExecResult("executed", f"matched {int(matched)}", size=int(matched),
+                               notional=matched * per_share_cost, legs=[buy_res, hedge_res])
 
     @staticmethod
     def _leg_ok(res) -> bool:
@@ -228,12 +243,50 @@ class CrossPlatformExecutor:
                 and res is not None
                 and getattr(res, "status", None) != OrderStatus.REJECTED)
 
+    async def _await_fill(self, platform: str, order) -> float:
+        """
+        Poll a placed leg until it reaches a terminal state (filled/cancelled) or
+        the timeout elapses; on timeout, cancel any resting remainder to stop
+        further fills. Returns the filled share count.
+        """
+        client = self.poly if platform == "polymarket" else self.kalshi
+        oid = getattr(order, "order_id", None)
+        if not oid:
+            return 0.0
+
+        filled = float(getattr(order, "filled_size", 0.0) or 0.0)
+        polls = max(1, int(self.config.fill_timeout_seconds / max(0.1, self.config.fill_poll_seconds)))
+        for _ in range(polls):
+            try:
+                st = await client.get_order(oid)
+                filled = st.get("filled_size", filled)
+                if st.get("status") in (OrderStatus.FILLED, OrderStatus.CANCELLED):
+                    return filled
+            except Exception as e:
+                logger.debug(f"fill poll error on {platform} {oid}: {e}")
+            await asyncio.sleep(self.config.fill_poll_seconds)
+
+        # Timed out still resting/partial -> cancel remainder, then read final fill.
+        try:
+            await client.cancel_order(oid)
+        except Exception as e:
+            logger.debug(f"cancel-on-timeout failed for {platform} {oid}: {e}")
+        try:
+            st = await client.get_order(oid)
+            filled = st.get("filled_size", filled)
+        except Exception:
+            pass
+        return filled
+
     async def _unwind(self, platform: str, ident: str, token: TokenType,
-                      entry_price: float, size: int) -> bool:
-        """Sell back a leg we are now holding (best effort)."""
+                      entry_price: float, size: float) -> bool:
+        """Sell back shares we are now holding (best effort)."""
+        qty = int(round(size))
+        if qty <= 0:
+            return True
         sell_price = max(0.01, round(entry_price * (1 - self.config.unwind_slippage), 2))
         try:
-            res = await self._place_leg(platform, ident, token, OrderSide.SELL, sell_price, size, "xplat_unwind")
+            res = await self._place_leg(platform, ident, token, OrderSide.SELL, sell_price, qty, "xplat_unwind")
             return self._leg_ok(res)
         except Exception as e:
             logger.error(f"Unwind sell failed on {platform} {ident}: {e}")
