@@ -46,6 +46,9 @@ logs/
 .env.local
 .env.*.local
 
+# Secrets (Kalshi .pem, wallet keys, etc.)
+secrets/
+
 # OS files
 .DS_Store
 Thumbs.db
