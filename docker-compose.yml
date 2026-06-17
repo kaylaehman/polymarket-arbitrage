@@ -1,0 +1,17 @@
+services:
+  polymarket-arb:
+    build: .
+    image: polymarket-arb:local
+    container_name: polymarket-arb
+    restart: unless-stopped
+    ports:
+      # host:container — dashboard. LAN-only (not exposed via Cloudflare).
+      - "8899:8888"
+    volumes:
+      # Mount config so creds/mode can be changed without rebuilding the image.
+      - ./config.yaml:/app/config.yaml
+      # Persist logs outside the container.
+      - ./logs:/app/logs
+    # Dry-run is baked into config.yaml (mode.trading_mode: dry_run).
+    # To go live: see GOING-LIVE.md, then either flip config.yaml or append --live here.
+    command: ["python", "run_with_dashboard.py", "--config", "config.yaml", "--port", "8888"]

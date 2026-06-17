@@ -30,6 +30,7 @@ from core.execution import ExecutionEngine, ExecutionConfig
 from core.risk_manager import RiskManager, RiskConfig
 from core.portfolio import Portfolio
 from core.cross_platform_arb import CrossPlatformArbEngine, MarketMatcher
+from core.cross_platform_execution import CrossPlatformExecutor, CrossExecConfig
 from utils.config_loader import load_config, BotConfig
 from utils.logging_utils import setup_logging
 from dashboard.server import app, dashboard_state
@@ -60,6 +61,7 @@ class TradingBotWithDashboard:
         self.kalshi_client = None
         self.cross_platform_engine = None
         self.market_matcher = None
+        self.cross_executor = None
         self._kalshi_markets = []
         self._matched_pairs = []
         
@@ -85,7 +87,11 @@ class TradingBotWithDashboard:
             ws_url=self.config.api.polymarket_ws_url,
             gamma_url=self.config.api.gamma_api_url,
             api_key=self.config.api.api_key,
+            api_secret=self.config.api.api_secret,
+            passphrase=self.config.api.passphrase,
             private_key=self.config.api.private_key,
+            signature_type=self.config.api.signature_type,
+            funder=self.config.api.funder,
             timeout=self.config.api.timeout_seconds,
             dry_run=self.config.is_dry_run,
         )
@@ -98,6 +104,8 @@ class TradingBotWithDashboard:
                 timeout=self.config.api.timeout_seconds,
                 max_retries=self.config.api.max_retries,
                 dry_run=self.config.is_dry_run,
+                api_key_id=self.config.api.kalshi_api_key_id,
+                private_key_pem=self.config.api.kalshi_private_key,
             )
             
             # Initialize cross-platform arbitrage engine
@@ -306,9 +314,17 @@ class TradingBotWithDashboard:
                 
                 # Set initial status
                 dashboard_state.cross_platform["matching_status"] = "starting"
-                
-                # Start matching as a background task (dashboard will show progress)
-                asyncio.create_task(self._run_matching_background(polymarket_markets))
+
+                # Run matching (its heavy work is offloaded to a thread, so the
+                # event loop stays responsive). We AWAIT it here — rather than
+                # fire-and-forget — so the Kalshi client stays open for the
+                # arbitrage monitor loop that follows.
+                await self._run_matching_background(polymarket_markets)
+
+                # Now continuously detect (and optionally execute) cross-platform
+                # arbs across the matched pairs. Keeps running until shutdown,
+                # which keeps `async with self.kalshi_client` open.
+                await self._monitor_cross_platform_arbs()
     
     async def _run_matching_background(self, polymarket_markets: list) -> None:
         """Run market matching in a thread pool so dashboard stays fully responsive."""
@@ -385,7 +401,86 @@ class TradingBotWithDashboard:
             import traceback
             traceback.print_exc()
             dashboard_state.cross_platform["matching_status"] = "error"
-    
+
+    async def _monitor_cross_platform_arbs(self) -> None:
+        """
+        Continuously poll matched pairs for live cross-platform arbitrage and
+        route any opportunity to the atomic two-leg executor.
+
+        Detection/alerting always runs. Whether orders are actually placed is
+        gated by mode.cross_platform_execution_enabled (and dry_run simulates).
+        """
+        pairs = sorted(
+            self._matched_pairs or [],
+            key=lambda p: p.similarity_score,
+            reverse=True,
+        )[: self.config.monitoring.cross_platform_max_pairs]
+
+        if not pairs or not self.kalshi_client or not self.cross_platform_engine:
+            logger.info("Cross-platform monitor: no matched pairs to watch.")
+            return
+
+        self.cross_executor = CrossPlatformExecutor(
+            poly_client=self.client,
+            kalshi_client=self.kalshi_client,
+            risk_manager=self.risk_manager,
+            portfolio=self.portfolio,
+            config=CrossExecConfig(
+                dry_run=self.config.is_dry_run,
+                execution_enabled=self.config.mode.cross_platform_execution_enabled,
+                max_trade_notional=self.config.trading.cross_platform_max_trade_notional,
+            ),
+        )
+
+        poll = self.config.monitoring.cross_platform_poll_seconds
+        logger.info(
+            f"Cross-platform arb monitor started: {len(pairs)} pairs, every {poll}s "
+            f"(execution={'ON' if self.config.mode.cross_platform_execution_enabled else 'OFF — detect only'})"
+        )
+
+        while self._running:
+            found = 0
+            for pair in pairs:
+                if not self._running:
+                    break
+                try:
+                    poly_ob = await self.client.get_orderbook(pair.polymarket_id)
+                    kalshi_ob = await self.kalshi_client.get_orderbook_unified(pair.kalshi_ticker)
+                    if not poly_ob or not kalshi_ob:
+                        continue
+
+                    opp = self.cross_platform_engine.check_arbitrage(pair, poly_ob, kalshi_ob)
+                    if not opp:
+                        continue
+
+                    found += 1
+                    dashboard_state.add_cross_platform_opportunity({
+                        "poly_question": pair.polymarket_question,
+                        "kalshi_title": pair.kalshi_title,
+                        "token": opp.token,
+                        "buy_platform": opp.buy_platform,
+                        "sell_platform": opp.sell_platform,
+                        "buy_price": round(opp.buy_price, 4),
+                        "sell_price": round(opp.sell_price, 4),
+                        "net_edge": round(opp.net_edge, 4),
+                        "edge_pct": round(opp.edge_pct, 4),
+                        "suggested_size": opp.suggested_size,
+                    })
+
+                    result = await self.cross_executor.execute(opp)
+                    logger.info(f"Cross-platform exec [{result.status}]: {result.detail}")
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.debug(f"Cross-platform check failed for {pair.pair_id}: {e}")
+
+                # Throttle between pairs to stay under venue rate limits.
+                await asyncio.sleep(0.15)
+
+            if found:
+                logger.info(f"Cross-platform sweep: {found} opportunities across {len(pairs)} pairs")
+            await asyncio.sleep(poll)
+
     async def stop(self) -> None:
         """Stop everything gracefully."""
         logger.info("Shutting down...")

@@ -112,6 +112,8 @@ class PolymarketClient(BasePolymarketClient):
         api_secret: Optional[str] = None,
         passphrase: Optional[str] = None,
         private_key: Optional[str] = None,
+        signature_type: int = 0,
+        funder: Optional[str] = None,
         timeout: float = 30.0,
         max_retries: int = 3,
         retry_delay: float = 1.0,
@@ -124,11 +126,17 @@ class PolymarketClient(BasePolymarketClient):
         self.api_secret = api_secret
         self.passphrase = passphrase
         self.private_key = private_key
+        self.signature_type = signature_type
+        self.funder = funder
         self.timeout = timeout
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.dry_run = dry_run
-        
+
+        # Live CLOB client (py-clob-client) + derived wallet address; live mode only.
+        self._clob = None
+        self._address: str = ""
+
         # HTTP client
         self._http_client: Optional[httpx.AsyncClient] = None
         
@@ -152,12 +160,56 @@ class PolymarketClient(BasePolymarketClient):
         await self.disconnect()
     
     async def connect(self) -> None:
-        """Initialize HTTP client."""
+        """Initialize HTTP client and, in live mode, the signing CLOB client."""
         self._http_client = httpx.AsyncClient(
             timeout=self.timeout,
             headers=self._get_headers(),
         )
+        if not self.dry_run:
+            await self._init_clob_client()
         logger.info(f"Polymarket client connected (dry_run={self.dry_run})")
+
+    async def _init_clob_client(self) -> None:
+        """
+        Initialize the authenticated py-clob-client for live trading.
+
+        Handles L1 (wallet signature) -> L2 (API key) auth: uses provided CLOB
+        creds if present, otherwise derives them from the private key.
+        """
+        if not self.private_key:
+            raise RuntimeError("Live trading requires api.private_key (Polygon wallet key).")
+
+        # py-clob-client is heavy (web3/eth-account); only import for live trading.
+        from py_clob_client.client import ClobClient
+        from py_clob_client.clob_types import ApiCreds
+
+        def _build():
+            kwargs = dict(key=self.private_key, chain_id=137, signature_type=self.signature_type)
+            if self.funder:
+                kwargs["funder"] = self.funder
+            client = ClobClient(self.rest_url, **kwargs)
+            if self.api_key and self.api_secret and self.passphrase:
+                creds = ApiCreds(
+                    api_key=self.api_key,
+                    api_secret=self.api_secret,
+                    api_passphrase=self.passphrase,
+                )
+            else:
+                creds = client.create_or_derive_api_creds()
+            client.set_api_creds(creds)
+            return client, creds
+
+        loop = asyncio.get_event_loop()
+        self._clob, creds = await loop.run_in_executor(None, _build)
+        # Persist derived creds back so they show up / can be reused.
+        self.api_key = creds.api_key
+        self.api_secret = creds.api_secret
+        self.passphrase = creds.api_passphrase
+        try:
+            self._address = await loop.run_in_executor(None, self._clob.get_address)
+        except Exception:
+            self._address = ""
+        logger.info(f"Polymarket CLOB client ready (address={self._address or 'unknown'}, sig_type={self.signature_type})")
     
     async def disconnect(self) -> None:
         """Close connections."""
@@ -170,16 +222,27 @@ class PolymarketClient(BasePolymarketClient):
         logger.info("Polymarket client disconnected")
     
     def _get_headers(self) -> dict[str, str]:
-        """Get authentication headers."""
-        headers = {
+        """
+        Default headers for the raw httpx client.
+
+        Only used for PUBLIC reads (Gamma markets, CLOB order books). Authenticated
+        order placement/cancellation goes through the py-clob-client (self._clob),
+        which performs proper L1/L2 signing.
+        """
+        return {
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
-        if self.api_key:
-            # TODO: Implement proper CLOB API authentication
-            # Polymarket uses L1/L2 authentication with signatures
-            headers["POLY_API_KEY"] = self.api_key
-        return headers
+
+    async def _get_token_id(self, market_id: str, token_type: TokenType) -> str:
+        """Resolve the CLOB ERC-1155 token id for a market's YES/NO outcome."""
+        market = self._markets_cache.get(market_id)
+        if market is None:
+            market = await self.get_market(market_id)
+        token_id = market.yes_token_id if token_type == TokenType.YES else market.no_token_id
+        if not token_id:
+            raise ValueError(f"No {token_type.value} token id for market {market_id}")
+        return token_id
     
     async def _request(
         self,
@@ -698,11 +761,17 @@ class PolymarketClient(BasePolymarketClient):
             logger.info("Simulated orderbook stream cancelled")
             raise
 
-    async def _connect_websocket(self, market_ids: list[str]) -> None:
+    async def _connect_websocket(self, token_ids: list[str]) -> None:
         """
-        Connect to Polymarket WebSocket.
-        
-        TODO: Implement actual WebSocket connection and subscription.
+        Connect to the Polymarket CLOB market WebSocket and subscribe.
+
+        The market channel takes a single subscription listing the outcome token
+        ids (a.k.a. asset ids), not market/condition ids:
+            {"assets_ids": [...], "type": "market"}
+
+        Note: the live data path used by this bot is REST polling (see
+        stream_orderbook); this WS helper is an optional lower-latency
+        alternative and is not wired in by default.
         """
         try:
             self._ws_connection = await websockets.connect(
@@ -710,45 +779,62 @@ class PolymarketClient(BasePolymarketClient):
                 ping_interval=30,
                 ping_timeout=10,
             )
-            
-            # Subscribe to markets
-            for market_id in market_ids:
-                subscribe_msg = json.dumps({
-                    "type": "subscribe",
-                    "market": market_id,
-                    "channel": "book",
-                })
-                await self._ws_connection.send(subscribe_msg)
-                self._ws_subscriptions.add(market_id)
-            
-            logger.info(f"WebSocket connected, subscribed to {len(market_ids)} markets")
-            
+
+            subscribe_msg = json.dumps({
+                "assets_ids": list(token_ids),
+                "type": "market",
+            })
+            await self._ws_connection.send(subscribe_msg)
+            self._ws_subscriptions.update(token_ids)
+
+            logger.info(f"WebSocket connected, subscribed to {len(token_ids)} tokens")
+
         except Exception as e:
             logger.error(f"WebSocket connection failed: {e}")
             raise
     
     async def get_positions(self) -> dict[str, dict[TokenType, Position]]:
         """
-        Get all current positions.
-        
-        TODO: Implement with actual Polymarket API.
+        Get all current positions from the Polymarket Data API.
+
+        Positions live on the Data API (data-api.polymarket.com), not the CLOB,
+        and are keyed there by outcome asset id, which we map back to YES/NO via
+        the market cache.
         """
         if self.dry_run:
             return self._simulated_positions.copy()
-        
+
+        if not self._address:
+            logger.warning("No wallet address available; cannot fetch positions.")
+            return {}
+
         try:
-            # Real API call would go here
-            data = await self._request("GET", "/positions")
-            positions = {}
-            for item in data:
-                market_id = item["market_id"]
-                token_type = TokenType.YES if item["outcome"] == "Yes" else TokenType.NO
+            data = await self._request(
+                "GET",
+                "/positions",
+                params={"user": self._address, "sizeThreshold": 0.0},
+                base_url="https://data-api.polymarket.com",
+            )
+            positions: dict[str, dict[TokenType, Position]] = {}
+            for item in data or []:
+                market_id = str(item.get("conditionId") or item.get("market") or "")
+                asset = str(item.get("asset", ""))
+                size = float(item.get("size", 0))
+                if not market_id or size == 0:
+                    continue
+                # Determine YES/NO from the asset (token) id via the market cache.
+                token_type = TokenType.YES
+                market = self._markets_cache.get(market_id)
+                if market and asset:
+                    token_type = TokenType.NO if asset == market.no_token_id else TokenType.YES
+                elif item.get("outcome"):
+                    token_type = TokenType.NO if str(item["outcome"]).lower().startswith("no") else TokenType.YES
                 positions.setdefault(market_id, {})[token_type] = Position(
                     market_id=market_id,
                     token_type=token_type,
-                    size=float(item["size"]),
-                    avg_entry_price=float(item.get("avg_price", 0)),
-                    realized_pnl=float(item.get("realized_pnl", 0)),
+                    size=size,
+                    avg_entry_price=float(item.get("avgPrice", 0)),
+                    realized_pnl=float(item.get("realizedPnl", 0)),
                 )
             return positions
         except Exception as e:
@@ -765,10 +851,11 @@ class PolymarketClient(BasePolymarketClient):
         strategy_tag: str = ""
     ) -> Order:
         """
-        Place a limit order.
-        
-        TODO: Implement with actual Polymarket CLOB API:
-        POST https://clob.polymarket.com/order
+        Place a GTC limit order on the Polymarket CLOB.
+
+        Live mode signs an EIP-712 order with the wallet key (via py-clob-client)
+        and submits it. `size` is the number of outcome shares; `price` is the
+        per-share price in dollars (0..1).
         """
         order_id = f"order_{uuid.uuid4().hex[:12]}"
         order = Order(
@@ -781,53 +868,69 @@ class PolymarketClient(BasePolymarketClient):
             status=OrderStatus.OPEN,
             strategy_tag=strategy_tag,
         )
-        
+
         if self.dry_run:
             logger.info(f"[DRY RUN] Placing order: {order}")
             self._simulated_orders[order_id] = order
             return order
-        
+
+        if self._clob is None:
+            raise RuntimeError("CLOB client not initialized; call connect() in live mode first.")
+
         try:
-            # TODO: Implement actual order placement
-            # Would need to:
-            # 1. Build order with proper token IDs
-            # 2. Sign with private key
-            # 3. Submit to CLOB
-            payload = {
-                "market_id": market_id,
-                "token_id": "",  # TODO: Map token_type to actual token ID
-                "side": side.value,
-                "price": str(price),
-                "size": str(size),
-            }
-            
-            data = await self._request("POST", "/order", json_data=payload)
-            order.order_id = data.get("order_id", order_id)
-            order.status = OrderStatus.OPEN
-            
-            logger.info(f"Order placed: {order.order_id}")
-            return order
-            
+            from py_clob_client.clob_types import OrderArgs, OrderType
+            from py_clob_client.order_builder.constants import BUY, SELL
+
+            token_id = await self._get_token_id(market_id, token_type)
+            clob_side = BUY if side == OrderSide.BUY else SELL
+
+            def _submit():
+                order_args = OrderArgs(
+                    token_id=token_id,
+                    price=float(price),
+                    size=float(size),
+                    side=clob_side,
+                )
+                signed = self._clob.create_order(order_args)
+                return self._clob.post_order(signed, OrderType.GTC)
+
+            data = await asyncio.get_event_loop().run_in_executor(None, _submit)
+
+            if isinstance(data, dict) and data.get("success", True):
+                order.order_id = data.get("orderID") or data.get("orderId") or order_id
+                status = (data.get("status") or "live").lower()
+                order.status = {
+                    "matched": OrderStatus.FILLED,
+                    "live": OrderStatus.OPEN,
+                    "delayed": OrderStatus.PENDING,
+                }.get(status, OrderStatus.OPEN)
+                logger.info(f"Order placed: {order.order_id} ({status})")
+                return order
+
+            # success == False
+            err = data.get("errorMsg") or data if isinstance(data, dict) else str(data)
+            raise RuntimeError(f"CLOB rejected order: {err}")
+
         except Exception as e:
             logger.error(f"Failed to place order: {e}")
             order.status = OrderStatus.REJECTED
             raise
     
     async def cancel_order(self, order_id: str) -> None:
-        """
-        Cancel an open order.
-        
-        TODO: Implement with actual Polymarket CLOB API:
-        DELETE https://clob.polymarket.com/order/{order_id}
-        """
+        """Cancel an open order on the CLOB."""
         if self.dry_run:
             if order_id in self._simulated_orders:
                 self._simulated_orders[order_id].status = OrderStatus.CANCELLED
                 logger.info(f"[DRY RUN] Cancelled order: {order_id}")
             return
-        
+
+        if self._clob is None:
+            raise RuntimeError("CLOB client not initialized; call connect() in live mode first.")
+
         try:
-            await self._request("DELETE", f"/order/{order_id}")
+            await asyncio.get_event_loop().run_in_executor(
+                None, lambda: self._clob.cancel(order_id=order_id)
+            )
             logger.info(f"Order cancelled: {order_id}")
         except Exception as e:
             logger.error(f"Failed to cancel order {order_id}: {e}")
@@ -856,22 +959,40 @@ class PolymarketClient(BasePolymarketClient):
             ]
             return orders
         
+        if self._clob is None:
+            return []
         try:
-            params = {"market_id": market_id} if market_id else None
-            data = await self._request("GET", "/orders", params=params)
-            
+            raw = await asyncio.get_event_loop().run_in_executor(None, self._clob.get_orders)
             orders = []
-            for item in data:
-                orders.append(Order(
-                    order_id=item["order_id"],
-                    market_id=item["market_id"],
-                    token_type=TokenType.YES if item["outcome"] == "Yes" else TokenType.NO,
-                    side=OrderSide(item["side"]),
-                    price=float(item["price"]),
-                    size=float(item["size"]),
-                    filled_size=float(item.get("filled_size", 0)),
-                    status=OrderStatus(item["status"]),
-                ))
+            for item in raw or []:
+                size = float(item.get("original_size", item.get("size", 0)))
+                matched = float(item.get("size_matched", 0))
+                asset = str(item.get("asset_id", ""))
+                # Map asset id -> YES/NO if we have the market cached.
+                cond = str(item.get("market", ""))
+                token_type = TokenType.YES
+                m = self._markets_cache.get(cond)
+                if m and asset:
+                    token_type = TokenType.NO if asset == m.no_token_id else TokenType.YES
+                status_map = {
+                    "LIVE": OrderStatus.OPEN,
+                    "MATCHED": OrderStatus.FILLED,
+                    "CANCELED": OrderStatus.CANCELLED,
+                    "DELAYED": OrderStatus.PENDING,
+                }
+                order = Order(
+                    order_id=item.get("id", item.get("order_id", "")),
+                    market_id=cond,
+                    token_type=token_type,
+                    side=OrderSide.BUY if str(item.get("side", "BUY")).upper() == "BUY" else OrderSide.SELL,
+                    price=float(item.get("price", 0)),
+                    size=size,
+                    filled_size=matched,
+                    status=status_map.get(str(item.get("status", "LIVE")).upper(), OrderStatus.OPEN),
+                )
+                if market_id and order.market_id != market_id:
+                    continue
+                orders.append(order)
             return orders
         except Exception as e:
             logger.warning(f"Failed to fetch open orders: {e}")
@@ -885,31 +1006,35 @@ class PolymarketClient(BasePolymarketClient):
                 trades = [t for t in trades if t.market_id == market_id]
             return trades
         
+        if self._clob is None:
+            return []
         try:
-            params = {"limit": limit}
-            if market_id:
-                params["market_id"] = market_id
-            
-            data = await self._request("GET", "/trades", params=params)
-            
+            raw = await asyncio.get_event_loop().run_in_executor(None, self._clob.get_trades)
             trades = []
-            for item in data:
+            for item in (raw or [])[:limit]:
+                cond = str(item.get("market", ""))
+                if market_id and cond != market_id:
+                    continue
+                asset = str(item.get("asset_id", ""))
+                token_type = TokenType.YES
+                m = self._markets_cache.get(cond)
+                if m and asset:
+                    token_type = TokenType.NO if asset == m.no_token_id else TokenType.YES
                 trades.append(Trade(
-                    trade_id=item["trade_id"],
-                    order_id=item["order_id"],
-                    market_id=item["market_id"],
-                    token_type=TokenType.YES if item["outcome"] == "Yes" else TokenType.NO,
-                    side=OrderSide(item["side"]),
-                    price=float(item["price"]),
-                    size=float(item["size"]),
-                    fee=float(item.get("fee", 0)),
-                    timestamp=datetime.fromisoformat(item["timestamp"]),
+                    trade_id=item.get("id", ""),
+                    order_id=item.get("taker_order_id", item.get("order_id", "")),
+                    market_id=cond,
+                    token_type=token_type,
+                    side=OrderSide.BUY if str(item.get("side", "BUY")).upper() == "BUY" else OrderSide.SELL,
+                    price=float(item.get("price", 0)),
+                    size=float(item.get("size", 0)),
+                    fee=float(item.get("fee_rate_bps", 0)) / 10000.0 * float(item.get("price", 0)) * float(item.get("size", 0)),
                 ))
             return trades
         except Exception as e:
             logger.warning(f"Failed to fetch trades: {e}")
             return []
-    
+
     def simulate_fill(self, order_id: str, fill_size: Optional[float] = None) -> Optional[Trade]:
         """
         Simulate an order fill (for dry run mode).
