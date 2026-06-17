@@ -10,14 +10,28 @@ api:
   # Kalshi API endpoint (public, no auth needed for market data)
   kalshi_api_url: "https://api.elections.kalshi.com/trade-api/v2"
   
-  # Authentication (replace with your credentials)
-  api_key: "YOUR_API_KEY_HERE"
-  api_secret: "YOUR_API_SECRET_HERE"
-  passphrase: "YOUR_PASSPHRASE_HERE"
-  
-  # Wallet configuration
+  # Polymarket CLOB API creds (OPTIONAL). If left blank they are derived
+  # automatically from private_key on startup (L1 -> L2). Prefer env:
+  # POLYMARKET_API_KEY / _API_SECRET / _PASSPHRASE.
+  api_key: ""
+  api_secret: ""
+  passphrase: ""
+
+  # Polygon wallet private key that signs orders. REQUIRED for live trading.
+  # Prefer env POLYMARKET_PRIVATE_KEY over committing it here.
   private_key: "YOUR_PRIVATE_KEY_HERE"
-  
+
+  # Wallet type for CLOB signing: 0=EOA (default), 1=email/magic proxy, 2=browser proxy.
+  # For 1/2 also set `funder` to the address that holds your USDC.
+  signature_type: 0
+  funder: ""
+
+  # Kalshi trading creds (RSA key pair from Kalshi settings). Only needed to
+  # place/cancel Kalshi orders; market data needs none. Prefer env
+  # KALSHI_API_KEY_ID / KALSHI_PRIVATE_KEY (the latter may be a path to a .pem).
+  kalshi_api_key_id: ""
+  kalshi_private_key: ""
+
   # Request settings
   timeout_seconds: 30
   max_retries: 3
@@ -44,6 +58,7 @@ trading:
   # Execution settings
   slippage_tolerance: 0.02  # Max allowed slippage from signal to execution
   order_timeout_seconds: 60 # Cancel unfilled orders after this time
+  cross_platform_max_trade_notional: 15  # Max $ across BOTH legs of one cross-platform arb
   
   # Fees (Polymarket rates - conservative estimates)
   maker_fee_bps: 0          # 0% for maker (limit orders adding liquidity)
@@ -84,6 +99,9 @@ mode:
   cross_platform_enabled: true    # Enable cross-platform arbitrage detection
   kalshi_enabled: true            # Enable Kalshi market monitoring
   min_match_similarity: 0.6       # Minimum similarity score for market matching (0-1)
+  # Hard gate: actually PLACE cross-platform orders. Stays off even in live mode
+  # until explicitly enabled. Detection/alerting runs regardless.
+  cross_platform_execution_enabled: false
   
   # Dry run settings
   dry_run_initial_balance: 10000
@@ -115,4 +133,8 @@ monitoring:
   # Performance metrics
   track_latency: true
   track_fill_rates: true
+
+  # Cross-platform arb monitoring loop
+  cross_platform_poll_seconds: 30   # seconds between sweeps of matched pairs
+  cross_platform_max_pairs: 60      # cap on pairs polled per sweep (rate-limit guard)
 

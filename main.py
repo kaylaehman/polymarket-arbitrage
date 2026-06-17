@@ -308,8 +308,13 @@ async def run_backtest(config: BotConfig, duration: float = 300.0) -> None:
         default_order_size=config.trading.default_order_size,
     ))
     
-    # Use placeholder client for execution
-    client = PolymarketClient(dry_run=True)
+    # Backtests always run against a simulated (dry-run) client by design —
+    # no real orders are placed regardless of config.mode.
+    client = PolymarketClient(
+        rest_url=config.api.polymarket_rest_url,
+        gamma_url=config.api.gamma_api_url,
+        dry_run=True,
+    )
     await client.connect()
     
     execution_engine = ExecutionEngine(
