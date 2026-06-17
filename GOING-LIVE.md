@@ -67,6 +67,27 @@ size. Keep `cross_platform_execution_enabled: false` until you've watched it
 detect-only for a while and confirmed the opportunities are real (matcher false
 positives exist — see the noisy "sports" matches in logs).
 
+## Kalshi-only mode (US users without Polymarket access)
+
+Polymarket geoblocks US persons, so cross-platform arb usually isn't usable by one
+person. For Kalshi-only operation there are two modes (both simulate in dry_run,
+place real Kalshi orders only when `trading_mode: live`):
+
+- **`mode.kalshi_native_enabled`** — single-venue **bundle arbitrage on Kalshi**
+  (riskless): when a market's `YES_ask + NO_ask < $1` after fees, buy both; one
+  side always pays $1. Runs a dedicated `ArbEngine` + `ExecutionEngine` on Kalshi
+  order books (`run_with_dashboard.py::_run_kalshi_trading`), watching the top
+  `monitoring.kalshi_max_markets` by volume every `kalshi_poll_seconds`. These are
+  rare but genuinely free money when they appear.
+- **`mode.kalshi_oracle_enabled`** — **directional**, NOT arbitrage: when Kalshi is
+  mispriced vs Polymarket, take only the Kalshi leg, using Polymarket as a price
+  oracle (`CrossPlatformExecutor.execute_kalshi_leg_only`). Carries real event
+  risk — the edge is Kalshi being wrong relative to Polymarket, not a hedge.
+
+Polymarket stays read-only as the reference feed; only your Kalshi creds are used.
+Setup: fund Kalshi, create an API key (Settings → API), set `kalshi_api_key_id` +
+`kalshi_private_key`, enable a mode, run in dry_run to validate, then `trading_mode: live`.
+
 ## Order-size semantics (resolved)
 
 `place_order(size=...)` is **share/contract count**, which is what both the
