@@ -237,6 +237,71 @@ class CrossPlatformExecutor:
         return CrossExecResult("executed", f"matched {int(matched)}", size=int(matched),
                                notional=matched * per_share_cost, legs=[buy_res, hedge_res])
 
+    def _kalshi_leg(self, opp):
+        """The Kalshi side of a cross-platform opp, as a BUY (token, price)."""
+        token = TokenType.YES if opp.token.upper() == "YES" else TokenType.NO
+        if opp.buy_platform == "kalshi":
+            return token, float(opp.buy_price)
+        # sell_platform == kalshi -> "sell token" == buy opposite at 1 - sell_price
+        return _opposite(token), max(0.0, 1.0 - float(opp.sell_price))
+
+    async def execute_kalshi_leg_only(self, opp) -> CrossExecResult:
+        """
+        DIRECTIONAL: take only the Kalshi leg of a cross-platform gap, using
+        Polymarket as a price oracle. This is NOT riskless arbitrage — it leaves
+        an open position with real event risk; the edge is Kalshi being mispriced
+        vs Polymarket's (typically more efficient) price.
+        """
+        pair_id = opp.market_pair.pair_id
+        if self._on_cooldown(pair_id):
+            self.stats.skipped += 1
+            return CrossExecResult("skipped", "cooldown")
+
+        token, price = self._kalshi_leg(opp)
+        if price <= 0:
+            self.stats.skipped += 1
+            return CrossExecResult("skipped", "non-positive price")
+
+        size = int(max(self.config.min_size, opp.suggested_size or 0))
+        max_by_notional = int(self.config.max_trade_notional // price)
+        if max_by_notional < self.config.min_size:
+            self.stats.skipped += 1
+            return CrossExecResult("skipped", "min trade exceeds notional cap")
+        size = min(size, max_by_notional)
+        notional = size * price
+
+        if not self.risk_manager.within_global_limits():
+            self.stats.skipped += 1
+            return CrossExecResult("skipped", "global risk limit", size=size, notional=notional)
+
+        self._arm_cooldown(pair_id)
+        ticker = opp.market_pair.kalshi_ticker
+        plan = f"DIRECTIONAL BUY {size} {token.value} on kalshi@{price:.3f} (oracle: poly={opp.buy_price if opp.buy_platform=='polymarket' else opp.sell_price})"
+
+        if self.config.dry_run:
+            logger.info(f"[DRY-RUN] kalshi oracle trade: {plan}")
+            try:
+                await self.kalshi.place_order(ticker=ticker, token_type=token, side=OrderSide.BUY,
+                                              price=price, size=size, strategy_tag="kalshi_oracle")
+            except Exception as e:
+                logger.debug(f"dry-run kalshi oracle sim error (ignored): {e}")
+            self.stats.executed += 1
+            return CrossExecResult("executed", f"DRY-RUN: {plan}", size=size, notional=notional)
+
+        logger.info(f"[LIVE] kalshi oracle trade: {plan}")
+        try:
+            res = await self.kalshi.place_order(ticker=ticker, token_type=token, side=OrderSide.BUY,
+                                                price=price, size=size, strategy_tag="kalshi_oracle")
+            if self._leg_ok(res):
+                self.stats.executed += 1
+                return CrossExecResult("executed", plan, size=size, notional=notional, legs=[res])
+            self.stats.errors += 1
+            return CrossExecResult("error", f"kalshi order rejected: {res}", size=size, notional=notional)
+        except Exception as e:
+            self.stats.errors += 1
+            logger.error(f"kalshi oracle trade failed: {e}")
+            return CrossExecResult("error", str(e), size=size, notional=notional)
+
     @staticmethod
     def _leg_ok(res) -> bool:
         return (not isinstance(res, Exception)

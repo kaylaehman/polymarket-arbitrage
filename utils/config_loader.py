@@ -92,6 +92,15 @@ class ModeConfig:
     # Hard gate: actually PLACE cross-platform orders (vs detect-and-alert only).
     # Even in live mode this stays off until you explicitly enable it.
     cross_platform_execution_enabled: bool = False
+
+    # Kalshi-only operation (for users who can trade Kalshi but not Polymarket):
+    # kalshi_native_enabled runs single-venue bundle-arb detection/trading on
+    # Kalshi order books (riskless; YES+NO < $1). kalshi_oracle_enabled also takes
+    # the DIRECTIONAL Kalshi leg of a cross-platform gap using Polymarket as a
+    # price oracle (NOT riskless — carries event risk). Both simulate in dry_run
+    # and only place real orders in live mode.
+    kalshi_native_enabled: bool = False
+    kalshi_oracle_enabled: bool = False
     dry_run_initial_balance: float = 10000.0
     simulate_fills: bool = True
     fill_probability: float = 0.8
@@ -120,6 +129,9 @@ class MonitoringConfig:
     # Cross-platform arb monitoring loop
     cross_platform_poll_seconds: float = 30.0   # seconds between full sweeps of matched pairs
     cross_platform_max_pairs: int = 60          # cap on matched pairs polled (rate-limit guard)
+    # Kalshi-native bundle-arb loop
+    kalshi_poll_seconds: float = 10.0           # seconds between sweeps of watched Kalshi markets
+    kalshi_max_markets: int = 100               # cap on Kalshi markets watched (by volume)
 
 
 @dataclass

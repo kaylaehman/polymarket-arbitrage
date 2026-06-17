@@ -30,6 +30,7 @@ from polymarket_client.models import (
     OrderSide,
     OrderStatus,
     Position,
+    Trade,
     TokenType,
 )
 
@@ -74,6 +75,8 @@ class KalshiClient:
         self._markets_cache: dict[str, KalshiMarket] = {}
         # Simulated state for dry-run trading (mirrors PolymarketClient behaviour)
         self._simulated_orders: dict[str, Order] = {}
+        self._simulated_positions: dict[str, dict[TokenType, Position]] = {}
+        self._simulated_trades: list[Trade] = []
         
     async def __aenter__(self) -> "KalshiClient":
         """Async context manager entry."""
@@ -225,16 +228,20 @@ class KalshiClient:
 
     async def place_order(
         self,
-        ticker: str,
-        token_type: TokenType,
-        side: OrderSide,
-        price: float,
-        size: float,
+        ticker: str = "",
+        token_type: TokenType = TokenType.YES,
+        side: OrderSide = OrderSide.BUY,
+        price: float = 0.0,
+        size: float = 0.0,
         strategy_tag: str = "",
         time_in_force: Optional[str] = None,
+        market_id: str = "",
     ) -> Order:
         """
         Place a limit order on Kalshi.
+
+        Accepts either `ticker` (native) or `market_id` (the unified
+        "kalshi:<ticker>" form used by the shared ExecutionEngine).
 
         Maps the bot's unified order model to Kalshi's POST /portfolio/orders:
           - token_type YES/NO          -> side "yes"/"no"
@@ -245,7 +252,7 @@ class KalshiClient:
         `ticker` may be the bare Kalshi ticker or the unified "kalshi:<ticker>".
         Returns a unified Order with market_id="kalshi:<ticker>".
         """
-        ticker = ticker.split("kalshi:", 1)[-1]
+        ticker = (ticker or market_id).split("kalshi:", 1)[-1]
         market_id = f"kalshi:{ticker}"
         order_id = f"korder_{uuid.uuid4().hex[:12]}"
 
@@ -421,6 +428,57 @@ class KalshiClient:
         except Exception as e:
             logger.warning(f"Failed to parse Kalshi order: {e}")
             return None
+
+    def simulate_fill(self, order_id: str, fill_size: Optional[float] = None) -> Optional[Trade]:
+        """Simulate a fill for a dry-run Kalshi order (mirrors PolymarketClient)."""
+        order = self._simulated_orders.get(order_id)
+        if not order or not order.is_open:
+            return None
+
+        fill_size = fill_size if fill_size is not None else order.remaining_size
+        fill_size = min(fill_size, order.remaining_size)
+        if fill_size <= 0:
+            return None
+
+        # Kalshi taker fee ~1% (rough); fee on notional.
+        fee = fill_size * order.price * 0.01
+        trade = Trade(
+            trade_id=f"ktrade_{uuid.uuid4().hex[:12]}",
+            order_id=order_id,
+            market_id=order.market_id,
+            token_type=order.token_type,
+            side=order.side,
+            price=order.price,
+            size=fill_size,
+            fee=fee,
+        )
+
+        order.filled_size += fill_size
+        order.updated_at = datetime.utcnow()
+        order.status = OrderStatus.FILLED if order.remaining_size <= 0 else OrderStatus.PARTIALLY_FILLED
+
+        self._update_simulated_position(trade)
+        self._simulated_trades.append(trade)
+        logger.info(f"[DRY RUN] Kalshi simulated fill: {trade.side.value} {fill_size} {trade.token_type.value} {order.market_id} @ {order.price:.2f}")
+        return trade
+
+    def _update_simulated_position(self, trade: Trade) -> None:
+        """Update simulated Kalshi position after a fill."""
+        positions = self._simulated_positions.setdefault(trade.market_id, {})
+        pos = positions.get(trade.token_type)
+        if pos is None:
+            pos = Position(market_id=trade.market_id, token_type=trade.token_type, size=0, avg_entry_price=0)
+            positions[trade.token_type] = pos
+
+        if trade.side == OrderSide.BUY:
+            new_size = pos.size + trade.size
+            if new_size > 0:
+                pos.avg_entry_price = (pos.avg_entry_price * pos.size + trade.price * trade.size) / new_size
+            pos.size = new_size
+        else:
+            if pos.size > 0:
+                pos.realized_pnl += (trade.price - pos.avg_entry_price) * trade.size
+            pos.size -= trade.size
 
     # =========================================================================
     # SERIES ENDPOINTS
