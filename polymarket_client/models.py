@@ -8,7 +8,12 @@ Defines core data structures used throughout the trading system.
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    # Import only for type hints to avoid a runtime dependency on the
+    # intelligence layer. core/ must never hard-import intelligence/.
+    from intelligence.signal import SignalSummary
 
 
 class OrderSide(Enum):
@@ -303,7 +308,12 @@ class Opportunity:
     detected_at: datetime = field(default_factory=datetime.utcnow)
     expires_at: Optional[datetime] = None
     acted_upon: bool = False
-    
+
+    # [Intelligence] Advisory AI signal attached by the intelligence layer.
+    # None when intelligence is disabled, times out, or errors. Annotate-only:
+    # the engine never blocks a trade on this — it is for logging/dashboard.
+    signal: "Optional[SignalSummary]" = field(default=None, repr=False)
+
     @property
     def is_bundle_arb(self) -> bool:
         return self.opportunity_type in (OpportunityType.BUNDLE_LONG, OpportunityType.BUNDLE_SHORT)

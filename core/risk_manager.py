@@ -226,6 +226,10 @@ class RiskManager:
         self.state.kill_switch_reason = reason
         logger.critical(f"KILL SWITCH TRIGGERED: {reason}")
     
+    def trigger_kill_switch(self, reason: str = "Manual trigger") -> None:
+        """Public manual kill-switch trigger (e.g. from the agent control API)."""
+        self._trigger_kill_switch(reason)
+
     def reset_kill_switch(self) -> None:
         """Reset the kill switch (use with caution)."""
         self.state.kill_switch_triggered = False

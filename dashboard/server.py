@@ -26,6 +26,7 @@ class DashboardState:
         self.markets: dict = {}
         self.opportunities: list = []
         self.signals: list = []
+        self.ai_signals: list = []  # Intelligence-layer signals (Phase 3)
         self.orders: list = []
         self.trades: list = []
         self.portfolio: dict = {}
@@ -63,6 +64,7 @@ class DashboardState:
             "markets": self.markets,
             "opportunities": self.opportunities[-50:],  # Last 50
             "signals": self.signals[-50:],
+            "ai_signals": self.ai_signals[-50:],
             "orders": self.orders,
             "trades": self.trades[-100:],  # Last 100
             "portfolio": self.portfolio,
@@ -116,6 +118,13 @@ class DashboardState:
         if len(self.trades) > 500:
             self.trades = self.trades[-250:]
     
+    def add_ai_signal(self, signal: dict) -> None:
+        """Add an intelligence-layer AI signal (Phase 3 AI Signals panel)."""
+        signal["timestamp"] = datetime.utcnow().isoformat()
+        self.ai_signals.append(signal)
+        if len(self.ai_signals) > 200:
+            self.ai_signals = self.ai_signals[-100:]
+
     def add_cross_platform_opportunity(self, opportunity: dict) -> None:
         """Add a cross-platform arbitrage opportunity."""
         opportunity["timestamp"] = datetime.utcnow().isoformat()
@@ -179,6 +188,17 @@ def create_app() -> FastAPI:
     async def get_opportunities():
         """Get recent opportunities."""
         return {"opportunities": dashboard_state.opportunities[-50:]}
+
+    @app.get("/api/ai-signals")
+    async def get_ai_signals():
+        """Get recent intelligence-layer AI signals."""
+        return {"ai_signals": dashboard_state.ai_signals[-50:]}
+
+    @app.get("/health")
+    async def health():
+        """Liveness probe (FEAT-11 readiness)."""
+        uptime = (datetime.utcnow() - dashboard_state.started_at).total_seconds()
+        return {"status": "ok", "uptime_seconds": uptime}
     
     @app.get("/api/portfolio")
     async def get_portfolio():
@@ -1511,6 +1531,22 @@ def get_embedded_html() -> str:
             </div>
         </section>
         
+        <!-- 🧠 AI Signals (Intelligence Layer) -->
+        <section class="card activity-card" id="aiSignalsCard">
+            <div class="card-header">
+                <span class="card-title">🧠 AI Signals</span>
+                <span id="aiSignalCount" style="font-size: 0.75rem; color: var(--accent-purple);">0</span>
+            </div>
+            <div class="card-body">
+                <div class="activity-list" id="aiSignalList">
+                    <div class="empty-state">
+                        <div class="empty-icon">🧠</div>
+                        <div>No AI signals yet (enable intelligence)...</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
         <!-- 🔥 LIVE OPPORTUNITIES FEED -->
         <section class="card opportunities-feed">
             <div class="card-header">
@@ -1693,9 +1729,52 @@ def get_embedded_html() -> str:
             
             // Cross-Platform
             updateCrossPlatform();
-            
+
+            // AI Signals (intelligence layer)
+            updateAiSignals();
+
             // Markets
             updateMarkets();
+        }
+
+        function updateAiSignals() {
+            const list = document.getElementById('aiSignalList');
+            if (!list) return;
+            const signals = state.ai_signals || [];
+            document.getElementById('aiSignalCount').textContent = signals.length;
+
+            if (signals.length === 0) {
+                list.innerHTML = '<div class="empty-state"><div class="empty-icon">🧠</div><div>No AI signals yet (enable intelligence)...</div></div>';
+                return;
+            }
+
+            const dirColor = {
+                bullish: 'var(--accent-green)', bearish: 'var(--accent-red)',
+                agree: 'var(--accent-blue)', uncertain: 'var(--text-secondary)'
+            };
+            // Escape all externally-controlled fields (market questions, Claude
+            // reasoning) before injecting into innerHTML — prevents XSS.
+            const esc = v => String(v == null ? '' : v).replace(/[&<>"']/g,
+                c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+            const recent = signals.slice(-25).reverse();
+            list.innerHTML = recent.map(s => {
+                // Constrain direction to the known set before echoing it back.
+                const dir = dirColor.hasOwnProperty(s.direction) ? s.direction : 'uncertain';
+                const conf = ((s.confidence || 0) * 100).toFixed(0);  // numeric
+                const color = dirColor[dir];                           // allowlisted value
+                return `
+                    <div class="activity-item">
+                        <div class="activity-icon signal" style="color:${color}">${dir.charAt(0).toUpperCase()}</div>
+                        <div class="activity-content">
+                            <div class="activity-message">
+                                <span style="color:${color};font-weight:600;text-transform:uppercase">${dir}</span>
+                                · ${conf}% · ${esc(s.market)}
+                            </div>
+                            <div class="activity-time">${esc(s.reason)} — ${esc(formatTime(s.timestamp))}</div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
         }
         
         function updateMetrics() {

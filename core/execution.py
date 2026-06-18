@@ -39,6 +39,12 @@ class ExecutionConfig:
     retry_delay: float = 0.5
     enable_slippage_check: bool = True
     dry_run: bool = True
+    # Kelly sizing (FEAT-05) — disabled by default; sizes override the order spec
+    kelly_enabled: bool = False
+    kelly_fraction: float = 0.25
+    kelly_max_fraction: float = 0.10
+    min_order_size: float = 5.0
+    max_order_size: float = 200.0
 
 
 @dataclass
@@ -169,7 +175,12 @@ class ExecutionEngine:
                 price = order_spec["price"]
                 size = order_spec["size"]
                 strategy_tag = order_spec.get("strategy_tag", "")
-                
+
+                # Kelly sizing override (FEAT-05): only when enabled AND the
+                # opportunity carries an AI signal. Disabled by default.
+                if self.config.kelly_enabled and signal.opportunity is not None:
+                    size = self._kelly_size(signal.opportunity, fallback_size=size)
+
                 # Check slippage if enabled
                 if self.config.enable_slippage_check and signal.opportunity:
                     if not self._check_slippage(signal.opportunity, order_spec):
@@ -220,6 +231,42 @@ class ExecutionEngine:
             except Exception as e:
                 logger.error(f"Failed to cancel order {order_id}: {e}")
     
+    def _kelly_size(self, opportunity, fallback_size: float) -> float:
+        """Compute a Kelly-sized order from the opportunity's AI signal.
+
+        Returns ``fallback_size`` when there's no usable signal/price, or on any
+        error — so enabling Kelly can never crash order placement. Sizes are in
+        dollars (fraction of cash balance), clamped to [min, max] order size.
+        """
+        try:
+            summary = getattr(opportunity, "signal", None)
+            market_signal = summary.signal if summary is not None else None
+            if market_signal is None:
+                return fallback_size
+
+            yes_price = opportunity.best_ask_yes or opportunity.best_bid_yes
+            if not yes_price:
+                return fallback_size
+
+            from core.kelly import kelly_fraction
+            frac = kelly_fraction(
+                edge=opportunity.edge,
+                yes_price=yes_price,
+                ai_probability=market_signal.ai_probability,
+                confidence=market_signal.confidence,
+                fraction=self.config.kelly_fraction,
+                max_fraction=self.config.kelly_max_fraction,
+            )
+            size = frac * self.portfolio.cash_balance
+            size = max(self.config.min_order_size, min(size, self.config.max_order_size))
+            logger.info(
+                f"[Kelly] {opportunity.market_id}: fraction={frac:.4f} -> size=${size:.2f}"
+            )
+            return size
+        except Exception as e:
+            logger.warning(f"[Kelly] sizing failed, using fallback: {e}")
+            return fallback_size
+
     def _check_slippage(self, opportunity, order_spec: dict) -> bool:
         """
         Check if current prices have slipped too far from signal generation.

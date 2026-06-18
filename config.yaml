@@ -59,6 +59,16 @@ trading:
   slippage_tolerance: 0.02  # Max allowed slippage from signal to execution
   order_timeout_seconds: 60 # Cancel unfilled orders after this time
   cross_platform_max_trade_notional: 15  # Max $ across BOTH legs of one cross-platform arb
+
+  # Kelly criterion sizing (FEAT-05) — keep false until FEAT-09 signal data
+  # confirms the AI's probabilities are calibrated (miscalibrated + Kelly = ruin)
+  kelly_enabled: false
+  kelly_fraction: 0.25       # quarter-Kelly for reduced variance
+  kelly_max_fraction: 0.10   # never risk >10% of bankroll on one market
+
+  # Time-decay edge discounting (FEAT-07)
+  time_decay_enabled: false
+  skip_if_resolves_within_hours: 12   # hard skip regardless of edge
   
   # Fees (Polymarket rates - conservative estimates)
   maker_fee_bps: 0          # 0% for maker (limit orders adding liquidity)
@@ -134,10 +144,10 @@ logging:
 monitoring:
   # Portfolio snapshot interval (seconds)
   snapshot_interval: 60
-  
+
   # Heartbeat interval (seconds)
   heartbeat_interval: 30
-  
+
   # Performance metrics
   track_latency: true
   track_fill_rates: true
@@ -149,4 +159,45 @@ monitoring:
   # Kalshi-native bundle-arb loop
   kalshi_poll_seconds: 10           # seconds between sweeps of watched Kalshi markets
   kalshi_max_markets: 100           # cap on Kalshi markets watched (top by volume)
+
+# ── Intelligence Layer ────────────────────────────────────────────────────────
+# AI news-reading layer. Disabled by default — the bot runs fully without it.
+# When enabled, set NEWSAPI_KEY and ANTHROPIC_API_KEY (and optionally
+# ANTHROPIC_BASE_URL for the OpenClaw proxy) as environment variables.
+# Phase 2 is "annotate-only": signals are attached/logged, never block a trade.
+intelligence:
+  enabled: false              # Set true once NEWSAPI_KEY and ANTHROPIC_API_KEY are set
+  mode: "filter"              # "filter" | "boost" | "both"
+  min_confidence: 0.65        # AI confidence threshold to act on a signal
+  min_edge_boost: 0.03        # Divergence above which a signal flags a boost
+  min_edge_filter: 0.10       # Adverse divergence above which it would filter an arb
+  max_position_boost: 10      # Max $ per AI-boosted directional position
+
+  news:
+    lookback_hours: 4         # How far back to fetch news (max 24 for free tier)
+    max_articles: 5           # Articles sent to Claude per market
+    cache_ttl_minutes: 10     # Don't re-fetch news for same topic within this window
+    sources: []               # Empty = NewsAPI defaults, or e.g. ["reuters", "bbc-news"]
+
+  claude:
+    model: "claude-sonnet-4-6"
+    max_tokens: 512
+    timeout_seconds: 8        # Skip the signal and continue if Claude is slower
+
+# ── Agent Control API (for an external agent, e.g. OpenClaw) ──────────────────
+# Exposes /api/agent for read + control. Requires AGENT_API_TOKEN env var; the
+# surface is fully disabled (503) without it. Destructive actions need confirm.
+agent:
+  enabled: false             # Mount the /api/agent control surface
+  allow_control: false       # Allow pause/kill endpoints (read-only when false)
+
+# ── Signal Database (SQLite, append-only) ─────────────────────────────────────
+# Persists signals + opportunities so AI calibration can be measured over time.
+# Foundation for Kelly sizing (FEAT-05) and the backtester (FEAT-10).
+database:
+  enabled: false             # Set true to record signals/opportunities to SQLite
+  path: "data/signals.db"
+  log_signals: true
+  log_opportunities: true
+  auto_log_outcomes: true    # Poll Gamma API for resolutions (poller is TBD)
 

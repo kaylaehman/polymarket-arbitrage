@@ -52,7 +52,14 @@ class TradingBot:
         self.execution_engine: Optional[ExecutionEngine] = None
         self.risk_manager: Optional[RiskManager] = None
         self.portfolio: Optional[Portfolio] = None
-        
+
+        # Intelligence layer (optional, annotate-only)
+        self.intelligence_engine = None
+
+        # Signal database (optional, append-only persistence)
+        self.signal_db = None
+        self.outcome_poller = None
+
         # Statistics
         self._start_time: Optional[datetime] = None
         self._update_count = 0
@@ -115,6 +122,11 @@ class TradingBot:
                 slippage_tolerance=self.config.trading.slippage_tolerance,
                 order_timeout_seconds=self.config.trading.order_timeout_seconds,
                 dry_run=self.config.is_dry_run,
+                kelly_enabled=self.config.trading.kelly_enabled,
+                kelly_fraction=self.config.trading.kelly_fraction,
+                kelly_max_fraction=self.config.trading.kelly_max_fraction,
+                min_order_size=self.config.trading.min_order_size,
+                max_order_size=self.config.trading.max_order_size,
             ),
         )
         await self.execution_engine.start()
@@ -129,8 +141,40 @@ class TradingBot:
             default_order_size=self.config.trading.default_order_size,
             min_order_size=self.config.trading.min_order_size,
             max_order_size=self.config.trading.max_order_size,
+            time_decay_enabled=self.config.trading.time_decay_enabled,
+            skip_if_resolves_within_hours=self.config.trading.skip_if_resolves_within_hours,
         ))
-        
+
+        # Initialize intelligence layer (optional; annotate-only, never blocks trades)
+        try:
+            from intelligence.intelligence_engine import build_engine
+            self.intelligence_engine = build_engine(self.config.intelligence)
+            if self.intelligence_engine is not None:
+                logger.info("[Intelligence] Engine initialized (annotate-only)")
+        except Exception as e:
+            logger.warning(f"[Intelligence] init failed, continuing without: {e}")
+            self.intelligence_engine = None
+
+        # Initialize signal database (optional; append-only persistence)
+        if self.config.database.enabled:
+            try:
+                from utils.signal_db import SignalDB
+                self.signal_db = SignalDB(db_path=self.config.database.path)
+                logger.info(f"[SignalDB] Logging to {self.config.database.path}")
+            except Exception as e:
+                logger.warning(f"[SignalDB] init failed, continuing without: {e}")
+                self.signal_db = None
+
+        # Start the outcome poller (records resolutions so accuracy can be measured)
+        if self.signal_db is not None and self.config.database.auto_log_outcomes:
+            try:
+                from utils.outcome_poller import OutcomePoller
+                self.outcome_poller = OutcomePoller(self.client, self.signal_db)
+                await self.outcome_poller.start()
+            except Exception as e:
+                logger.warning(f"[OutcomePoller] init failed, continuing without: {e}")
+                self.outcome_poller = None
+
         # Initialize data feed
         market_ids = self.config.trading.markets.copy()
         self.data_feed = DataFeed(
@@ -168,11 +212,67 @@ class TradingBot:
         
         # Analyze for opportunities
         signals = self.arb_engine.analyze(market_state)
-        
+
         for signal in signals:
             self._signal_count += 1
-            # Submit signal asynchronously
-            asyncio.create_task(self.execution_engine.submit_signal(signal))
+            # Submit signal asynchronously. When intelligence is enabled, annotate
+            # the opportunity with an advisory AI signal first (never blocks the trade).
+            if self.intelligence_engine is not None and self.config.intelligence.enabled:
+                asyncio.create_task(self._annotate_and_submit(signal, market_state))
+            else:
+                asyncio.create_task(self.execution_engine.submit_signal(signal))
+
+    async def _annotate_and_submit(self, signal, market_state) -> None:
+        """Attach an advisory AI signal to the opportunity, then submit it.
+
+        Annotate-only: logged and stored on the opportunity, never blocks
+        execution. Any failure is swallowed so the trade proceeds normally.
+        """
+        try:
+            opp = signal.opportunity
+            if opp is not None:
+                summary = await self.intelligence_engine.evaluate(
+                    market_id=signal.market_id,
+                    market_question=market_state.market.question or signal.market_id,
+                    current_yes_price=self._yes_price_from_book(market_state.order_book),
+                    arb_edge=opp.edge,
+                    resolution_criteria=market_state.market.description or None,
+                )
+                opp.signal = summary
+                if summary.signal is not None:
+                    logger.info(f"[Intelligence] {signal.market_id}: {summary.reason}")
+                    if summary.should_filter:
+                        logger.info(
+                            f"[Intelligence] (annotate-only) would filter "
+                            f"{signal.market_id} — proceeding anyway"
+                        )
+                self._persist_to_db(summary, opp)
+        except Exception as e:
+            logger.warning(f"[Intelligence] annotate failed for {signal.market_id}: {e}")
+
+        await self.execution_engine.submit_signal(signal)
+
+    def _persist_to_db(self, summary, opp) -> None:
+        """Append the signal + opportunity to the SQLite store, if enabled."""
+        if self.signal_db is None:
+            return
+        try:
+            signal_id = None
+            if summary.signal is not None and self.config.database.log_signals:
+                signal_id = self.signal_db.log_signal(summary.signal, platform="polymarket")
+            if self.config.database.log_opportunities:
+                self.signal_db.log_opportunity(opp, signal_id=signal_id)
+        except Exception as e:
+            logger.warning(f"[SignalDB] failed to persist {opp.market_id}: {e}")
+
+    @staticmethod
+    def _yes_price_from_book(order_book) -> float:
+        """Best estimate of the current YES price: mid, else a side, else 0.5."""
+        bid = order_book.best_bid_yes
+        ask = order_book.best_ask_yes
+        if bid is not None and ask is not None:
+            return (bid + ask) / 2
+        return bid or ask or 0.5
     
     async def _monitoring_loop(self) -> None:
         """Periodic monitoring and logging."""
@@ -250,9 +350,15 @@ class TradingBot:
         if self.execution_engine:
             await self.execution_engine.stop()
         
+        if self.outcome_poller:
+            await self.outcome_poller.stop()
+
         if self.client:
             await self.client.disconnect()
-        
+
+        if self.signal_db:
+            self.signal_db.close()
+
         # Final summary
         if self.portfolio:
             summary = self.portfolio.get_summary()

@@ -67,6 +67,18 @@ class TradingBotWithDashboard:
         self.kalshi_execution_engine = None
         self._kalshi_markets = []
         self._matched_pairs = []
+        self.cross_monitor = None
+        self._monitor_kalshi = None
+
+        # Intelligence layer (optional, annotate-only)
+        self.intelligence_engine = None
+
+        # Signal database (optional, append-only persistence)
+        self.signal_db = None
+        self.outcome_poller = None
+
+        # External-agent control (optional, e.g. OpenClaw)
+        self.agent_controller = None
         
         # Server
         self._server = None
@@ -150,6 +162,11 @@ class TradingBotWithDashboard:
                 slippage_tolerance=self.config.trading.slippage_tolerance,
                 order_timeout_seconds=self.config.trading.order_timeout_seconds,
                 dry_run=self.config.is_dry_run,
+                kelly_enabled=self.config.trading.kelly_enabled,
+                kelly_fraction=self.config.trading.kelly_fraction,
+                kelly_max_fraction=self.config.trading.kelly_max_fraction,
+                min_order_size=self.config.trading.min_order_size,
+                max_order_size=self.config.trading.max_order_size,
             ),
         )
         await self.execution_engine.start()
@@ -164,8 +181,40 @@ class TradingBotWithDashboard:
             default_order_size=self.config.trading.default_order_size,
             min_order_size=self.config.trading.min_order_size,
             max_order_size=self.config.trading.max_order_size,
+            time_decay_enabled=self.config.trading.time_decay_enabled,
+            skip_if_resolves_within_hours=self.config.trading.skip_if_resolves_within_hours,
         ))
-        
+
+        # Initialize intelligence layer (optional; annotate-only, never blocks trades)
+        try:
+            from intelligence.intelligence_engine import build_engine
+            self.intelligence_engine = build_engine(self.config.intelligence)
+            if self.intelligence_engine is not None:
+                logger.info("[Intelligence] Engine initialized (annotate-only)")
+        except Exception as e:
+            logger.warning(f"[Intelligence] init failed, continuing without: {e}")
+            self.intelligence_engine = None
+
+        # Initialize signal database (optional; append-only persistence)
+        if self.config.database.enabled:
+            try:
+                from utils.signal_db import SignalDB
+                self.signal_db = SignalDB(db_path=self.config.database.path)
+                logger.info(f"[SignalDB] Logging to {self.config.database.path}")
+            except Exception as e:
+                logger.warning(f"[SignalDB] init failed, continuing without: {e}")
+                self.signal_db = None
+
+        # Start the outcome poller (records resolutions so accuracy can be measured)
+        if self.signal_db is not None and self.config.database.auto_log_outcomes:
+            try:
+                from utils.outcome_poller import OutcomePoller
+                self.outcome_poller = OutcomePoller(self.client, self.signal_db)
+                await self.outcome_poller.start()
+            except Exception as e:
+                logger.warning(f"[OutcomePoller] init failed, continuing without: {e}")
+                self.outcome_poller = None
+
         # Initialize data feed
         market_ids = self.config.trading.markets.copy()
         self.data_feed = DataFeed(
@@ -187,7 +236,31 @@ class TradingBotWithDashboard:
             mode="dry_run" if self.config.is_dry_run else "live",
         )
         await self.dashboard_integration.start()
-        
+
+        # Mount the external-agent control API (e.g. OpenClaw) if enabled.
+        # The surface still requires AGENT_API_TOKEN at runtime or it returns 503.
+        if self.config.agent.enabled:
+            try:
+                from core.agent_control import AgentController
+                from dashboard.agent_api import router as agent_router, set_controller
+                self.agent_controller = AgentController(
+                    portfolio=self.portfolio,
+                    risk_manager=self.risk_manager,
+                    execution_engine=self.execution_engine,
+                    signal_db=self.signal_db,
+                    dashboard=dashboard_state,
+                    mode="dry_run" if self.config.is_dry_run else "live",
+                )
+                set_controller(self.agent_controller, allow_control=self.config.agent.allow_control)
+                app.include_router(agent_router)
+                logger.info(
+                    "[AgentAPI] Control surface mounted at /api/agent "
+                    f"(control={'on' if self.config.agent.allow_control else 'read-only'})"
+                )
+            except Exception as e:
+                logger.warning(f"[AgentAPI] failed to mount, continuing without: {e}")
+                self.agent_controller = None
+
         # Start fill simulation for dry run
         if self.config.is_dry_run and self.config.mode.simulate_fills:
             asyncio.create_task(self._simulate_fills())
@@ -214,7 +287,11 @@ class TradingBotWithDashboard:
         """Handle market updates."""
         if not self._running:
             return
-        
+
+        # Paused by the external agent control API — stop submitting new signals.
+        if self.agent_controller is not None and self.agent_controller.paused:
+            return
+
         # Check risk limits
         if not self.risk_manager.within_global_limits():
             return
@@ -236,9 +313,72 @@ class TradingBotWithDashboard:
                 action=signal.action,
                 market_id=signal.market_id,
             )
-            
-            # Submit to execution
-            asyncio.create_task(self.execution_engine.submit_signal(signal))
+
+            # Submit to execution. When intelligence is enabled, annotate the
+            # opportunity with an advisory AI signal first (never blocks the trade).
+            if self.intelligence_engine is not None and self.config.intelligence.enabled:
+                asyncio.create_task(self._annotate_and_submit(signal, market_state))
+            else:
+                asyncio.create_task(self.execution_engine.submit_signal(signal))
+
+    async def _annotate_and_submit(self, signal, market_state) -> None:
+        """Attach an advisory AI signal to the opportunity, then submit it.
+
+        Annotate-only: the signal is logged and stored on the opportunity for the
+        dashboard, but never blocks execution. Any failure is swallowed so the
+        trade proceeds exactly as it would without the intelligence layer.
+        """
+        try:
+            opp = signal.opportunity
+            if opp is not None:
+                summary = await self.intelligence_engine.evaluate(
+                    market_id=signal.market_id,
+                    market_question=market_state.market.question or signal.market_id,
+                    current_yes_price=self._yes_price_from_book(market_state.order_book),
+                    arb_edge=opp.edge,
+                    resolution_criteria=market_state.market.description or None,
+                )
+                opp.signal = summary
+                if summary.signal is not None:
+                    logger.info(f"[Intelligence] {signal.market_id}: {summary.reason}")
+                    if summary.should_filter:
+                        logger.info(
+                            f"[Intelligence] (annotate-only) would filter "
+                            f"{signal.market_id} — proceeding anyway"
+                        )
+                    dashboard_state.add_ai_signal({
+                        "market": signal.market_id,
+                        "direction": summary.signal.direction,
+                        "confidence": summary.signal.confidence,
+                        "reason": summary.reason,
+                    })
+                self._persist_to_db(summary, opp)
+        except Exception as e:
+            logger.warning(f"[Intelligence] annotate failed for {signal.market_id}: {e}")
+
+        await self.execution_engine.submit_signal(signal)
+
+    def _persist_to_db(self, summary, opp) -> None:
+        """Append the signal + opportunity to the SQLite store, if enabled."""
+        if self.signal_db is None:
+            return
+        try:
+            signal_id = None
+            if summary.signal is not None and self.config.database.log_signals:
+                signal_id = self.signal_db.log_signal(summary.signal, platform="polymarket")
+            if self.config.database.log_opportunities:
+                self.signal_db.log_opportunity(opp, signal_id=signal_id)
+        except Exception as e:
+            logger.warning(f"[SignalDB] failed to persist {opp.market_id}: {e}")
+
+    @staticmethod
+    def _yes_price_from_book(order_book) -> float:
+        """Best estimate of the current YES price: mid, else a side, else 0.5."""
+        bid = order_book.best_bid_yes
+        ask = order_book.best_ask_yes
+        if bid is not None and ask is not None:
+            return (bid + ask) / 2
+        return bid or ask or 0.5
     
     async def _simulate_fills(self) -> None:
         """Simulate order fills in dry run mode (Polymarket + Kalshi engines)."""
@@ -396,6 +536,30 @@ class TradingBotWithDashboard:
             dashboard_state.cross_platform["matched_pairs"] = len(self._matched_pairs)
             
             logger.info(f"✓ Matching complete! Found {len(self._matched_pairs)} pairs")
+
+            # Start live cross-platform arb monitoring (annotate-only, human review).
+            # Uses a dedicated long-lived Kalshi client for orderbook polling.
+            try:
+                from kalshi_client import KalshiClient
+                from core.cross_platform_monitor import CrossPlatformMonitor
+                self._monitor_kalshi = KalshiClient(
+                    timeout=self.config.api.timeout_seconds, dry_run=self.config.is_dry_run,
+                )
+                await self._monitor_kalshi.__aenter__()
+                self.cross_monitor = CrossPlatformMonitor(
+                    engine=self.cross_platform_engine,
+                    data_feed=self.data_feed,
+                    kalshi_client=self._monitor_kalshi,
+                    get_pairs=lambda: self._matched_pairs,
+                    intelligence_engine=self.intelligence_engine,
+                    intel_enabled=self.config.intelligence.enabled,
+                    signal_db=self.signal_db,
+                    dashboard=dashboard_state,
+                )
+                await self.cross_monitor.start()
+                logger.info("[CrossMonitor] Live cross-platform arb monitoring started")
+            except Exception as e:
+                logger.warning(f"[CrossMonitor] failed to start: {e}")
             
             # Prepare matched pairs data for dashboard display
             matched_pairs_display = []
@@ -593,9 +757,24 @@ class TradingBotWithDashboard:
         if self.kalshi_execution_engine:
             await self.kalshi_execution_engine.stop()
         
+        if self.cross_monitor:
+            await self.cross_monitor.stop()
+
+        if self._monitor_kalshi:
+            try:
+                await self._monitor_kalshi.__aexit__(None, None, None)
+            except Exception:
+                pass
+
+        if self.outcome_poller:
+            await self.outcome_poller.stop()
+
         if self.client:
             await self.client.disconnect()
-        
+
+        if self.signal_db:
+            self.signal_db.close()
+
         # Kalshi client is closed via async context manager in _start_kalshi_monitoring
         
         if self._server:

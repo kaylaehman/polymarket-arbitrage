@@ -71,3 +71,6 @@ coverage.xml
 # Sensitive config (use config.yaml.example for template)
 config.live.yaml
 
+# Tool artifacts (ruflo/ruvector local DB — not source)
+ruvector.db
+
