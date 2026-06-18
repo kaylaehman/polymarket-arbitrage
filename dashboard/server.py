@@ -1752,20 +1752,25 @@ def get_embedded_html() -> str:
                 bullish: 'var(--accent-green)', bearish: 'var(--accent-red)',
                 agree: 'var(--accent-blue)', uncertain: 'var(--text-secondary)'
             };
+            // Escape all externally-controlled fields (market questions, Claude
+            // reasoning) before injecting into innerHTML — prevents XSS.
+            const esc = v => String(v == null ? '' : v).replace(/[&<>"']/g,
+                c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
             const recent = signals.slice(-25).reverse();
             list.innerHTML = recent.map(s => {
-                const dir = s.direction || 'uncertain';
-                const conf = ((s.confidence || 0) * 100).toFixed(0);
-                const color = dirColor[dir] || 'var(--text-secondary)';
+                // Constrain direction to the known set before echoing it back.
+                const dir = dirColor.hasOwnProperty(s.direction) ? s.direction : 'uncertain';
+                const conf = ((s.confidence || 0) * 100).toFixed(0);  // numeric
+                const color = dirColor[dir];                           // allowlisted value
                 return `
                     <div class="activity-item">
                         <div class="activity-icon signal" style="color:${color}">${dir.charAt(0).toUpperCase()}</div>
                         <div class="activity-content">
                             <div class="activity-message">
                                 <span style="color:${color};font-weight:600;text-transform:uppercase">${dir}</span>
-                                · ${conf}% · ${s.market || ''}
+                                · ${conf}% · ${esc(s.market)}
                             </div>
-                            <div class="activity-time">${s.reason || ''} — ${formatTime(s.timestamp)}</div>
+                            <div class="activity-time">${esc(s.reason)} — ${esc(formatTime(s.timestamp))}</div>
                         </div>
                     </div>
                 `;
