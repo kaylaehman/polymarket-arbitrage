@@ -22,6 +22,7 @@ import logging
 from intelligence.ai_analyzer import AIAnalyzer
 from intelligence.cache import SignalCache
 from intelligence.news_fetcher import NewsFetcher
+from intelligence.resolution_parser import ResolutionParser
 from intelligence.signal import MarketSignal, SignalSummary, classify_direction
 from intelligence.topic_extractor import TopicExtractor
 
@@ -79,6 +80,7 @@ class IntelligenceEngine:
             ttl_minutes=getattr(config.news, "cache_ttl_minutes", 10)
         )
         self.extractor = TopicExtractor(analyzer=analyzer)
+        self.resolution_parser = ResolutionParser()
 
     async def evaluate(
         self,
@@ -86,10 +88,18 @@ class IntelligenceEngine:
         market_question: str,
         current_yes_price: float,
         arb_edge: float,
+        resolution_criteria: str | None = None,
     ) -> SignalSummary:
-        """Produce a ``SignalSummary`` for one opportunity. Never raises."""
+        """Produce a ``SignalSummary`` for one opportunity. Never raises.
+
+        ``resolution_criteria`` (FEAT-02) is the raw market description; the
+        engine cleans it and passes it to Claude so the assessment respects how
+        the market actually settles.
+        """
         try:
-            signal = await self._get_or_build_signal(market_id, market_question, current_yes_price)
+            signal = await self._get_or_build_signal(
+                market_id, market_question, current_yes_price, resolution_criteria
+            )
         except Exception as e:  # noqa: BLE001 — advisory layer must never break core
             logger.warning("[Intelligence] evaluate failed for %s: %s", market_id, e)
             return SignalSummary.neutral(arb_edge, reason=f"Intelligence error: {e}")
@@ -105,7 +115,11 @@ class IntelligenceEngine:
         return self._summarize(signal, arb_edge)
 
     async def _get_or_build_signal(
-        self, market_id: str, market_question: str, current_yes_price: float
+        self,
+        market_id: str,
+        market_question: str,
+        current_yes_price: float,
+        resolution_criteria: str | None = None,
     ) -> MarketSignal | None:
         """Return a cached signal or build a fresh one (extract -> news -> Claude)."""
         topic = await self.extractor.extract_query(market_question)
@@ -131,6 +145,7 @@ class IntelligenceEngine:
             current_yes_price=current_yes_price,
             articles=articles,
             lookback_hours=getattr(news_cfg, "lookback_hours", 4),
+            resolution_criteria=self.resolution_parser.extract(resolution_criteria),
         )
 
         signal = MarketSignal(

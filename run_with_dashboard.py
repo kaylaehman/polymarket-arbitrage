@@ -274,6 +274,7 @@ class TradingBotWithDashboard:
                     market_question=market_state.market.question or signal.market_id,
                     current_yes_price=self._yes_price_from_book(market_state.order_book),
                     arb_edge=opp.edge,
+                    resolution_criteria=market_state.market.description or None,
                 )
                 opp.signal = summary
                 if summary.signal is not None:

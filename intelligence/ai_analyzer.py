@@ -64,8 +64,13 @@ class AIAnalyzer:
         current_yes_price: float,
         articles: list,  # list[NewsArticle]
         lookback_hours: int = 4,
+        resolution_criteria: str | None = None,
     ) -> tuple[float, float, str]:
         """Assess a market against recent news.
+
+        ``resolution_criteria`` (FEAT-02), when provided, is included so Claude
+        judges the news against how the market actually resolves, not just the
+        question text.
 
         Returns ``(ai_probability, confidence, reasoning)``. On any failure it
         degrades gracefully to ``(current_yes_price, 0.0, <reason>)`` — never raises.
@@ -74,7 +79,8 @@ class AIAnalyzer:
             return current_yes_price, 0.0, "Analyzer disabled (no API key)"
 
         user_prompt = self._build_user_prompt(
-            market_question, current_yes_price, articles, lookback_hours
+            market_question, current_yes_price, articles, lookback_hours,
+            resolution_criteria,
         )
 
         try:
@@ -154,6 +160,7 @@ class AIAnalyzer:
         current_yes_price: float,
         articles: list,
         lookback_hours: int,
+        resolution_criteria: str | None = None,
     ) -> str:
         if articles:
             headlines = "\n".join(
@@ -164,10 +171,22 @@ class AIAnalyzer:
         else:
             headlines = "(no recent articles found)"
 
+        # Resolution criteria (FEAT-02): give Claude the exact settlement rule so
+        # it doesn't conflate "good news" with "resolves YES".
+        criteria_block = ""
+        closing_question = "Based on this news, what is the true probability for YES?"
+        if resolution_criteria:
+            criteria_block = f"Resolution criteria: {resolution_criteria}\n\n"
+            closing_question = (
+                "Given this specific resolution criteria, does the news suggest "
+                "YES or NO resolution? What is the true probability for YES?"
+            )
+
         return (
             f"Market question: {market_question}\n"
             f"Current YES price: {current_yes_price:.0%}\n\n"
+            f"{criteria_block}"
             f"Recent news ({len(articles)} articles from last {lookback_hours} hours):\n"
             f"{headlines}\n\n"
-            f"Based on this news, what is the true probability for YES?"
+            f"{closing_question}"
         )
