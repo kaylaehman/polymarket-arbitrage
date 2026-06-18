@@ -347,7 +347,9 @@ class PolymarketClient(BasePolymarketClient):
             outcomes_str = data.get("outcomes", "")
             # Parse outcome prices - JSON string like '[0.65, 0.35]'
             outcome_prices_str = data.get("outcomePrices", "")
-            
+
+            resolved = data.get("umaResolutionStatus") == "resolved"
+
             return Market(
                 market_id=market_id,
                 condition_id=condition_id,
@@ -357,15 +359,45 @@ class PolymarketClient(BasePolymarketClient):
                 no_token_id=no_token_id,
                 active=bool(data.get("active", True)),
                 closed=bool(data.get("closed", False)),
-                resolved=data.get("umaResolutionStatus") == "resolved",
+                resolved=resolved,
+                resolution=self._parse_resolution(outcome_prices_str) if resolved else None,
                 volume_24h=float(data.get("volume24hr") or data.get("volume24hrClob") or 0),
                 liquidity=float(data.get("liquidityNum") or data.get("liquidityClob") or 0),
+                end_date=self._parse_iso_datetime(data.get("endDate") or data.get("end_date_iso")),
                 category=data.get("category", "") or "",
             )
         except Exception as e:
             logger.warning(f"Failed to parse market: {e}")
             return None
-    
+
+    @staticmethod
+    def _parse_resolution(outcome_prices_str: str) -> Optional[str]:
+        """Infer "YES"/"NO" from a resolved market's outcome prices.
+
+        Gamma encodes prices as a JSON string like '["1", "0"]' (YES won) or
+        '["0", "1"]' (NO won). Best-effort: returns None if unparseable, so the
+        outcome poller simply skips the market rather than logging a wrong result.
+        """
+        if not outcome_prices_str:
+            return None
+        try:
+            prices = json.loads(outcome_prices_str)
+            if isinstance(prices, list) and prices:
+                return "YES" if float(prices[0]) >= 0.5 else "NO"
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+        return None
+
+    @staticmethod
+    def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
+        """Parse a Gamma ISO-8601 timestamp (tolerating a trailing 'Z')."""
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return None
+
     def _get_placeholder_markets(self) -> list[Market]:
         """Get placeholder markets for testing."""
         return [

@@ -58,6 +58,7 @@ class TradingBot:
 
         # Signal database (optional, append-only persistence)
         self.signal_db = None
+        self.outcome_poller = None
 
         # Statistics
         self._start_time: Optional[datetime] = None
@@ -121,6 +122,11 @@ class TradingBot:
                 slippage_tolerance=self.config.trading.slippage_tolerance,
                 order_timeout_seconds=self.config.trading.order_timeout_seconds,
                 dry_run=self.config.is_dry_run,
+                kelly_enabled=self.config.trading.kelly_enabled,
+                kelly_fraction=self.config.trading.kelly_fraction,
+                kelly_max_fraction=self.config.trading.kelly_max_fraction,
+                min_order_size=self.config.trading.min_order_size,
+                max_order_size=self.config.trading.max_order_size,
             ),
         )
         await self.execution_engine.start()
@@ -135,6 +141,8 @@ class TradingBot:
             default_order_size=self.config.trading.default_order_size,
             min_order_size=self.config.trading.min_order_size,
             max_order_size=self.config.trading.max_order_size,
+            time_decay_enabled=self.config.trading.time_decay_enabled,
+            skip_if_resolves_within_hours=self.config.trading.skip_if_resolves_within_hours,
         ))
 
         # Initialize intelligence layer (optional; annotate-only, never blocks trades)
@@ -156,6 +164,16 @@ class TradingBot:
             except Exception as e:
                 logger.warning(f"[SignalDB] init failed, continuing without: {e}")
                 self.signal_db = None
+
+        # Start the outcome poller (records resolutions so accuracy can be measured)
+        if self.signal_db is not None and self.config.database.auto_log_outcomes:
+            try:
+                from utils.outcome_poller import OutcomePoller
+                self.outcome_poller = OutcomePoller(self.client, self.signal_db)
+                await self.outcome_poller.start()
+            except Exception as e:
+                logger.warning(f"[OutcomePoller] init failed, continuing without: {e}")
+                self.outcome_poller = None
 
         # Initialize data feed
         market_ids = self.config.trading.markets.copy()
@@ -332,6 +350,9 @@ class TradingBot:
         if self.execution_engine:
             await self.execution_engine.stop()
         
+        if self.outcome_poller:
+            await self.outcome_poller.stop()
+
         if self.client:
             await self.client.disconnect()
 

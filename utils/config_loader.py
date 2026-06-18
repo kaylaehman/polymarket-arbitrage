@@ -48,6 +48,13 @@ class TradingConfig:
     max_order_size: float = 200.0
     slippage_tolerance: float = 0.02
     order_timeout_seconds: float = 60.0
+    # Kelly criterion sizing (FEAT-05) — disabled until signal data validates calibration
+    kelly_enabled: bool = False
+    kelly_fraction: float = 0.25       # quarter-Kelly for reduced variance
+    kelly_max_fraction: float = 0.10   # never risk >10% of bankroll on one market
+    # Time-decay edge discounting (FEAT-07)
+    time_decay_enabled: bool = False
+    skip_if_resolves_within_hours: float = 12.0
 
 
 @dataclass

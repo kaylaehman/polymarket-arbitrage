@@ -157,6 +157,20 @@ class SignalDB:
         self._conn.commit()
         return cur.lastrowid
 
+    def get_unresolved_market_ids(self) -> list[str]:
+        """Distinct market_ids that have signals but no recorded outcome yet.
+
+        The outcome poller uses this to know which markets still need a
+        resolution check.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT DISTINCT market_id FROM signals
+            WHERE market_id NOT IN (SELECT market_id FROM outcomes)
+            """
+        ).fetchall()
+        return [r["market_id"] for r in rows]
+
     def get_signal_accuracy(
         self,
         min_confidence: float = 0.65,

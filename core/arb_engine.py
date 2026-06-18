@@ -10,7 +10,7 @@ Detects trading opportunities including:
 import logging
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from polymarket_client.models import (
@@ -25,6 +25,39 @@ from polymarket_client.models import (
 
 
 logger = logging.getLogger(__name__)
+
+
+def hours_until_resolution(resolution_date: Optional[datetime]) -> Optional[float]:
+    """Hours from now until ``resolution_date``, or None if no date.
+
+    Robust to both tz-aware (Gamma ``end_date``) and naive datetimes — naive
+    values are treated as UTC so the subtraction never raises.
+    """
+    if resolution_date is None:
+        return None
+    rd = resolution_date
+    if rd.tzinfo is None:
+        rd = rd.replace(tzinfo=timezone.utc)
+    return (rd - datetime.now(timezone.utc)).total_seconds() / 3600
+
+
+def time_decay_multiplier(resolution_date: Optional[datetime]) -> float:
+    """Edge multiplier (0-1) that discounts opportunities near resolution (FEAT-07).
+
+    > 7 days: 1.0 | 2-7 days: 0.75 | 24-48h: 0.5 | < 24h: 0.25.
+    Markets resolving soon are riskier — less time for the price to correct.
+    Returns 1.0 when no resolution date is known.
+    """
+    hours = hours_until_resolution(resolution_date)
+    if hours is None:
+        return 1.0
+    if hours > 168:   # 7 days
+        return 1.0
+    if hours > 48:
+        return 0.75
+    if hours > 24:
+        return 0.5
+    return 0.25
 
 
 @dataclass
@@ -46,6 +79,10 @@ class ArbConfig:
     
     # Signal expiry
     signal_expiry_seconds: float = 5.0
+
+    # Time-decay edge discounting (FEAT-07)
+    time_decay_enabled: bool = False
+    skip_if_resolves_within_hours: float = 12.0
     
     # Fees (in basis points - 100 bps = 1%)
     # Polymarket: ~0% maker, ~1.5% taker
@@ -130,7 +167,9 @@ class ArbEngine:
         
         # Check for bundle arbitrage
         if self.config.bundle_arb_enabled:
-            bundle_signal = self._check_bundle_arbitrage(market_id, order_book)
+            bundle_signal = self._check_bundle_arbitrage(
+                market_id, order_book, market_state.market.end_date
+            )
             if bundle_signal:
                 signals.append(bundle_signal)
         
@@ -273,13 +312,18 @@ class ArbEngine:
             ]
         }
     
-    def _check_bundle_arbitrage(self, market_id: str, order_book: OrderBook) -> Optional[Signal]:
+    def _check_bundle_arbitrage(
+        self,
+        market_id: str,
+        order_book: OrderBook,
+        end_date: Optional[datetime] = None,
+    ) -> Optional[Signal]:
         """
         Check for bundle mispricing opportunities.
-        
+
         Bundle Long: Buy YES + NO when total_ask < 1 - min_edge - fees
         Bundle Short: Sell YES + NO when total_bid > 1 + min_edge + fees
-        
+
         Fees are factored in to ensure net profitability!
         """
         # Get prices
@@ -287,10 +331,22 @@ class ArbEngine:
         best_ask_no = order_book.best_ask_no
         best_bid_yes = order_book.best_bid_yes
         best_bid_no = order_book.best_bid_no
-        
+
         # Need all prices to evaluate
         if None in (best_ask_yes, best_ask_no, best_bid_yes, best_bid_no):
             return None
+
+        # Time-decay (FEAT-07): hard-skip markets resolving very soon, and
+        # discount the edge as resolution approaches. No-op unless enabled.
+        decay = 1.0
+        if self.config.time_decay_enabled and end_date is not None:
+            hours_left = hours_until_resolution(end_date)
+            if hours_left is not None and hours_left < self.config.skip_if_resolves_within_hours:
+                logger.debug(
+                    f"[TimeDecay] Skipping {market_id}: resolves in {hours_left:.1f}h"
+                )
+                return None
+            decay = time_decay_multiplier(end_date)
         
         total_ask = best_ask_yes + best_ask_no
         total_bid = best_bid_yes + best_bid_no
@@ -312,8 +368,8 @@ class ArbEngine:
         # Check for bundle long opportunity (buy both for < $1)
         # Must be profitable AFTER fees: 1.0 - total_ask - fees > min_edge
         gross_edge_long = 1.0 - total_ask
-        net_edge_long = gross_edge_long - fee_cost_long - gas_cost
-        
+        net_edge_long = (gross_edge_long - fee_cost_long - gas_cost) * decay
+
         if net_edge_long >= self.config.min_edge:
             edge = net_edge_long  # Use NET edge (after fees)
             
@@ -352,8 +408,8 @@ class ArbEngine:
         # Check for bundle short opportunity (sell both for > $1)
         # Must be profitable AFTER fees: total_bid - 1.0 - fees > min_edge
         gross_edge_short = total_bid - 1.0
-        net_edge_short = gross_edge_short - fee_cost_short - gas_cost
-        
+        net_edge_short = (gross_edge_short - fee_cost_short - gas_cost) * decay
+
         if opportunity is None and net_edge_short >= self.config.min_edge:
             edge = net_edge_short  # Use NET edge (after fees)
             
