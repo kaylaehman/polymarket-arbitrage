@@ -355,19 +355,30 @@ def _validate_config(config: BotConfig) -> None:
     
     # Live mode checks
     if config.is_live:
-        if not config.api.private_key or config.api.private_key == "YOUR_PRIVATE_KEY_HERE":
-            errors.append("api.private_key is required for live trading (Polygon wallet key)")
-        if config.api.signature_type not in (0, 1, 2):
-            errors.append("api.signature_type must be 0 (EOA), 1 (email proxy), or 2 (browser proxy)")
-        if config.api.signature_type in (1, 2) and not config.api.funder:
-            errors.append("api.funder (USDC-holding address) is required when signature_type is 1 or 2")
+        # Polymarket (polymarket.com) execution auto-falls back to simulated when
+        # no wallet key is set, so a missing key is allowed (Kalshi-only / read-only
+        # live). Only validate the signing params when a key IS provided.
+        has_poly_key = bool(config.api.private_key) and config.api.private_key != "YOUR_PRIVATE_KEY_HERE"
+        if has_poly_key:
+            if config.api.signature_type not in (0, 1, 2):
+                errors.append("api.signature_type must be 0 (EOA), 1 (email proxy), or 2 (browser proxy)")
+            if config.api.signature_type in (1, 2) and not config.api.funder:
+                errors.append("api.funder (USDC-holding address) is required when signature_type is 1 or 2")
 
-        # Kalshi creds only required if we actually trade the Kalshi leg.
-        if config.mode.kalshi_enabled and config.mode.cross_platform_enabled:
+        # Require Kalshi creds whenever any live Kalshi trading path is active.
+        kalshi_live = config.mode.kalshi_enabled and (
+            config.mode.cross_platform_enabled
+            or getattr(config.mode, "kalshi_native_enabled", False)
+            or getattr(config.mode, "kalshi_oracle_enabled", False)
+        )
+        if kalshi_live:
             if not config.api.kalshi_api_key_id:
                 errors.append("api.kalshi_api_key_id is required for live Kalshi trading")
             if not config.api.kalshi_private_key or "BEGIN" not in config.api.kalshi_private_key:
                 errors.append("api.kalshi_private_key must be an RSA PEM for live Kalshi trading")
+        # Sanity: live mode with no tradable venue at all.
+        if not has_poly_key and not kalshi_live:
+            errors.append("live mode but no tradable venue configured (no Polymarket key and no live Kalshi path)")
     
     if errors:
         raise ConfigError("Configuration validation failed:\n" + "\n".join(f"  - {e}" for e in errors))

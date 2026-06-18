@@ -108,7 +108,9 @@ class TradingBotWithDashboard:
             signature_type=self.config.api.signature_type,
             funder=self.config.api.funder,
             timeout=self.config.api.timeout_seconds,
-            dry_run=self.config.is_dry_run,
+            # Read-only (simulated) Polymarket unless a real polymarket.com wallet
+            # key is set. Placeholder/empty key must NOT attempt live CLOB auth.
+            dry_run=self.config.is_dry_run or self.config.api.private_key in (None, "", "YOUR_PRIVATE_KEY_HERE"),
         )
         await self.client.connect()
         
@@ -161,7 +163,10 @@ class TradingBotWithDashboard:
             config=ExecutionConfig(
                 slippage_tolerance=self.config.trading.slippage_tolerance,
                 order_timeout_seconds=self.config.trading.order_timeout_seconds,
-                dry_run=self.config.is_dry_run,
+                # Polymarket (polymarket.com CLOB) needs a Polygon wallet key to
+                # trade. With no key set, force simulation even in live mode so the
+                # Polymarket side stays read-only (Kalshi-only / Polymarket.US users).
+                dry_run=self.config.is_dry_run or self.config.api.private_key in (None, "", "YOUR_PRIVATE_KEY_HERE"),
                 kelly_enabled=self.config.trading.kelly_enabled,
                 kelly_fraction=self.config.trading.kelly_fraction,
                 kelly_max_fraction=self.config.trading.kelly_max_fraction,

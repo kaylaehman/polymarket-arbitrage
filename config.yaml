@@ -98,7 +98,7 @@ risk:
 
 mode:
   # Trading mode: "live" or "dry_run"
-  trading_mode: "dry_run"
+  trading_mode: "live"
   
   # Data mode: "real" or "simulation"
   # - "real": Fetch actual order books from Polymarket CLOB API
@@ -118,7 +118,7 @@ mode:
   #   kalshi_oracle_enabled  - directional Kalshi leg of a cross-platform gap,
   #                            using Polymarket as a price oracle (NOT riskless)
   # Both simulate in dry_run; place real Kalshi orders only when trading_mode: live.
-  kalshi_native_enabled: false
+  kalshi_native_enabled: true
   kalshi_oracle_enabled: false
   
   # Dry run settings
@@ -166,21 +166,21 @@ monitoring:
 # ANTHROPIC_BASE_URL for the OpenClaw proxy) as environment variables.
 # Phase 2 is "annotate-only": signals are attached/logged, never block a trade.
 intelligence:
-  enabled: false              # Set true once NEWSAPI_KEY and ANTHROPIC_API_KEY are set
-  mode: "filter"              # "filter" | "boost" | "both"
+  enabled: true               # ON: Claude via OpenClaw shim (ANTHROPIC_BASE_URL); NewsAPI optional
+  mode: "annotate"            # annotate-only: compute+display, never filter/boost a trade
   min_confidence: 0.65        # AI confidence threshold to act on a signal
   min_edge_boost: 0.03        # Divergence above which a signal flags a boost
   min_edge_filter: 0.10       # Adverse divergence above which it would filter an arb
   max_position_boost: 10      # Max $ per AI-boosted directional position
 
   news:
-    lookback_hours: 4         # How far back to fetch news (max 24 for free tier)
+    lookback_hours: 48        # NewsAPI /everything free tier indexes ~30d back; 4h was too tight (usually empty)
     max_articles: 5           # Articles sent to Claude per market
     cache_ttl_minutes: 10     # Don't re-fetch news for same topic within this window
     sources: []               # Empty = NewsAPI defaults, or e.g. ["reuters", "bbc-news"]
 
   claude:
-    model: "claude-sonnet-4-6"
+    model: "claude-proxy/main"   # OpenClaw shim alias -> Claude Max (haiku)
     max_tokens: 512
     timeout_seconds: 8        # Skip the signal and continue if Claude is slower
 
@@ -188,7 +188,7 @@ intelligence:
 # Exposes /api/agent for read + control. Requires AGENT_API_TOKEN env var; the
 # surface is fully disabled (503) without it. Destructive actions need confirm.
 agent:
-  enabled: false             # Mount the /api/agent control surface
+  enabled: true              # Mount /api/agent (read-only; allow_control=false)
   allow_control: false       # Allow pause/kill endpoints (read-only when false)
 
 # ── Signal Database (SQLite, append-only) ─────────────────────────────────────
