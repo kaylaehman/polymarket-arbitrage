@@ -280,7 +280,7 @@ class PolymarketUSClient(BasePolymarketClient):
                         yield (slug, ob)
                     except Exception as exc:
                         logger.debug(f"[PolymarketUS] book fetch failed for {slug}: {exc}")
-                    await asyncio.sleep(0.05)
+                    await asyncio.sleep(0.4)  # gentle: PM.US is behind Cloudflare and 429s on bursts
                 await asyncio.sleep(_BOOK_POLL_INTERVAL)
         except asyncio.CancelledError:
             logger.info("[PolymarketUS] Orderbook stream cancelled")

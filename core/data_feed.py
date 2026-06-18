@@ -122,12 +122,19 @@ class DataFeed:
                 # Discover markets if none specified - list_markets returns full Market objects!
                 markets = await self.client.list_markets({"active": True})
                 
-                # Store markets directly from the list - no need to re-fetch!
+                # Store ALL markets for matching/coverage (cross-platform matching
+                # reads self._markets — it needs the full universe).
                 for market in markets:
                     self._markets[market.market_id] = market
                 
-                self.market_ids = [m.market_id for m in markets]
-                logger.info(f"Discovered and loaded {len(self.market_ids)} active markets (no re-fetch needed!)")
+                # But only POLL orderbooks for a capped top-by-volume subset, so we
+                # don't hammer the venue (PM.US Cloudflare) with thousands of book
+                # requests. The cross-platform monitor fetches matched-pair books
+                # separately, so this cap doesn't reduce arb coverage.
+                _MAX_POLL_MARKETS = 60
+                polled = sorted(markets, key=lambda m: getattr(m, "volume_24h", 0) or 0, reverse=True)[:_MAX_POLL_MARKETS]
+                self.market_ids = [m.market_id for m in polled]
+                logger.info(f"Discovered {len(self._markets)} markets; polling orderbooks for top {len(self.market_ids)} by volume")
             else:
                 # Only fetch if specific market_ids were provided
                 for market_id in self.market_ids:
