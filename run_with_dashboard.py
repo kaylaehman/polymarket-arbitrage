@@ -304,6 +304,12 @@ class TradingBotWithDashboard:
                             f"[Intelligence] (annotate-only) would filter "
                             f"{signal.market_id} — proceeding anyway"
                         )
+                    dashboard_state.add_ai_signal({
+                        "market": signal.market_id,
+                        "direction": summary.signal.direction,
+                        "confidence": summary.signal.confidence,
+                        "reason": summary.reason,
+                    })
                 self._persist_to_db(summary, opp)
         except Exception as e:
             logger.warning(f"[Intelligence] annotate failed for {signal.market_id}: {e}")

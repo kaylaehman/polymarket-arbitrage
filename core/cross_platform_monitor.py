@@ -138,6 +138,15 @@ class CrossPlatformMonitor:
                 "ai_confidence": sig.confidence if sig else None,
                 "ai_reason": opp.signal.reason if opp.signal else None,
             })
+            # Also feed the dedicated AI Signals panel, if present.
+            add_ai = getattr(self.dashboard, "add_ai_signal", None)
+            if sig is not None and callable(add_ai):
+                add_ai({
+                    "market": pair.polymarket_question or pair.pair_id,
+                    "direction": sig.direction,
+                    "confidence": sig.confidence,
+                    "reason": opp.signal.reason,
+                })
         except Exception as e:  # noqa: BLE001
             logger.warning("[CrossMonitor] publish failed: %s", e)
 
