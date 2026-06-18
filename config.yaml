@@ -150,6 +150,13 @@ intelligence:
     max_tokens: 512
     timeout_seconds: 8        # Skip the signal and continue if Claude is slower
 
+# ── Agent Control API (for an external agent, e.g. OpenClaw) ──────────────────
+# Exposes /api/agent for read + control. Requires AGENT_API_TOKEN env var; the
+# surface is fully disabled (503) without it. Destructive actions need confirm.
+agent:
+  enabled: false             # Mount the /api/agent control surface
+  allow_control: false       # Allow pause/kill endpoints (read-only when false)
+
 # ── Signal Database (SQLite, append-only) ─────────────────────────────────────
 # Persists signals + opportunities so AI calibration can be measured over time.
 # Foundation for Kelly sizing (FEAT-05) and the backtester (FEAT-10).

@@ -71,6 +71,9 @@ class TradingBotWithDashboard:
         # Signal database (optional, append-only persistence)
         self.signal_db = None
         self.outcome_poller = None
+
+        # External-agent control (optional, e.g. OpenClaw)
+        self.agent_controller = None
         
         # Server
         self._server = None
@@ -222,7 +225,31 @@ class TradingBotWithDashboard:
             mode="dry_run" if self.config.is_dry_run else "live",
         )
         await self.dashboard_integration.start()
-        
+
+        # Mount the external-agent control API (e.g. OpenClaw) if enabled.
+        # The surface still requires AGENT_API_TOKEN at runtime or it returns 503.
+        if self.config.agent.enabled:
+            try:
+                from core.agent_control import AgentController
+                from dashboard.agent_api import router as agent_router, set_controller
+                self.agent_controller = AgentController(
+                    portfolio=self.portfolio,
+                    risk_manager=self.risk_manager,
+                    execution_engine=self.execution_engine,
+                    signal_db=self.signal_db,
+                    dashboard=dashboard_state,
+                    mode="dry_run" if self.config.is_dry_run else "live",
+                )
+                set_controller(self.agent_controller, allow_control=self.config.agent.allow_control)
+                app.include_router(agent_router)
+                logger.info(
+                    "[AgentAPI] Control surface mounted at /api/agent "
+                    f"(control={'on' if self.config.agent.allow_control else 'read-only'})"
+                )
+            except Exception as e:
+                logger.warning(f"[AgentAPI] failed to mount, continuing without: {e}")
+                self.agent_controller = None
+
         # Start fill simulation for dry run
         if self.config.is_dry_run and self.config.mode.simulate_fills:
             asyncio.create_task(self._simulate_fills())
@@ -249,7 +276,11 @@ class TradingBotWithDashboard:
         """Handle market updates."""
         if not self._running:
             return
-        
+
+        # Paused by the external agent control API — stop submitting new signals.
+        if self.agent_controller is not None and self.agent_controller.paused:
+            return
+
         # Check risk limits
         if not self.risk_manager.within_global_limits():
             return

@@ -148,6 +148,13 @@ class DatabaseConfig:
 
 
 @dataclass
+class AgentConfig:
+    """External agent control API (e.g. OpenClaw). Token via AGENT_API_TOKEN env."""
+    enabled: bool = False           # mount the /api/agent control surface
+    allow_control: bool = False     # allow pause/kill (read-only when false)
+
+
+@dataclass
 class BotConfig:
     """Complete bot configuration."""
     api: ApiConfig = field(default_factory=ApiConfig)
@@ -158,6 +165,7 @@ class BotConfig:
     monitoring: MonitoringConfig = field(default_factory=MonitoringConfig)
     intelligence: IntelligenceConfig = field(default_factory=IntelligenceConfig)
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
+    agent: AgentConfig = field(default_factory=AgentConfig)
     
     @property
     def is_dry_run(self) -> bool:
@@ -228,6 +236,7 @@ def load_config(config_path: str = "config.yaml") -> BotConfig:
         monitoring=_build_dataclass(MonitoringConfig, monitoring_data),
         intelligence=_build_intelligence_config(intelligence_data),
         database=_build_dataclass(DatabaseConfig, database_data),
+        agent=_build_dataclass(AgentConfig, raw_config.get("agent", {}) or {}),
     )
     
     # Validate
