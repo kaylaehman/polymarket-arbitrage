@@ -373,15 +373,19 @@ class ArbEngine:
         if net_edge_long >= self.config.min_edge:
             edge = net_edge_long  # Use NET edge (after fees)
             
-            # Calculate max size based on liquidity
+            # Calculate max size based on liquidity (best_ask_size is in SHARES)
             yes_ask_size = order_book.yes.best_ask_size or 0
             no_ask_size = order_book.no.best_ask_size or 0
             max_size = min(yes_ask_size, no_ask_size)
-            
+
+            # Sizing is in SHARES: dollar budget / price-per-share -> share count.
+            # This is what client.place_order expects (and notional = price*size).
             suggested_size = min(
                 self.config.default_order_size / max(best_ask_yes, best_ask_no),
                 max_size
             )
+            # NOTE: min_order_size is a share floor here (its config value reads as
+            # dollars, a minor pre-existing unit mismatch; harmless as a small floor).
             suggested_size = max(self.config.min_order_size, suggested_size)
             
             opportunity = Opportunity(

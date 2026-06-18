@@ -30,6 +30,8 @@ from core.execution import ExecutionEngine, ExecutionConfig
 from core.risk_manager import RiskManager, RiskConfig
 from core.portfolio import Portfolio
 from core.cross_platform_arb import CrossPlatformArbEngine, MarketMatcher
+from core.cross_platform_execution import CrossPlatformExecutor, CrossExecConfig
+from polymarket_client.models import Market, MarketState
 from utils.config_loader import load_config, BotConfig
 from utils.logging_utils import setup_logging
 from dashboard.server import app, dashboard_state
@@ -60,6 +62,9 @@ class TradingBotWithDashboard:
         self.kalshi_client = None
         self.cross_platform_engine = None
         self.market_matcher = None
+        self.cross_executor = None
+        self.kalshi_arb_engine = None
+        self.kalshi_execution_engine = None
         self._kalshi_markets = []
         self._matched_pairs = []
         self.cross_monitor = None
@@ -97,7 +102,11 @@ class TradingBotWithDashboard:
             ws_url=self.config.api.polymarket_ws_url,
             gamma_url=self.config.api.gamma_api_url,
             api_key=self.config.api.api_key,
+            api_secret=self.config.api.api_secret,
+            passphrase=self.config.api.passphrase,
             private_key=self.config.api.private_key,
+            signature_type=self.config.api.signature_type,
+            funder=self.config.api.funder,
             timeout=self.config.api.timeout_seconds,
             dry_run=self.config.is_dry_run,
         )
@@ -110,6 +119,8 @@ class TradingBotWithDashboard:
                 timeout=self.config.api.timeout_seconds,
                 max_retries=self.config.api.max_retries,
                 dry_run=self.config.is_dry_run,
+                api_key_id=self.config.api.kalshi_api_key_id,
+                private_key_pem=self.config.api.kalshi_private_key,
             )
             
             # Initialize cross-platform arbitrage engine
@@ -370,25 +381,31 @@ class TradingBotWithDashboard:
         return bid or ask or 0.5
     
     async def _simulate_fills(self) -> None:
-        """Simulate order fills in dry run mode."""
+        """Simulate order fills in dry run mode (Polymarket + Kalshi engines)."""
         import random
-        
+
+        # (execution_engine, client) pairs to simulate fills for.
+        def _pairs():
+            yield self.execution_engine, self.client
+            if self.kalshi_execution_engine and self.kalshi_client:
+                yield self.kalshi_execution_engine, self.kalshi_client
+
         while self._running:
             try:
                 await asyncio.sleep(2.0)
-                
-                orders = self.execution_engine.get_open_orders()
-                for order in orders:
-                    if random.random() < self.config.mode.fill_probability:
-                        trade = self.client.simulate_fill(order.order_id)
-                        if trade:
-                            self.execution_engine.handle_fill(trade)
-                            self.dashboard_integration.add_trade(
-                                side=trade.side.value,
-                                price=trade.price,
-                                size=trade.size,
-                                market_id=trade.market_id,
-                            )
+
+                for engine, client in _pairs():
+                    for order in engine.get_open_orders():
+                        if random.random() < self.config.mode.fill_probability:
+                            trade = client.simulate_fill(order.order_id)
+                            if trade:
+                                engine.handle_fill(trade)
+                                self.dashboard_integration.add_trade(
+                                    side=trade.side.value,
+                                    price=trade.price,
+                                    size=trade.size,
+                                    market_id=trade.market_id,
+                                )
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -446,9 +463,21 @@ class TradingBotWithDashboard:
                 
                 # Set initial status
                 dashboard_state.cross_platform["matching_status"] = "starting"
-                
-                # Start matching as a background task (dashboard will show progress)
-                asyncio.create_task(self._run_matching_background(polymarket_markets))
+
+                # Run matching (its heavy work is offloaded to a thread, so the
+                # event loop stays responsive). We AWAIT it here — rather than
+                # fire-and-forget — so the Kalshi client stays open for the
+                # arbitrage monitor loop that follows.
+                await self._run_matching_background(polymarket_markets)
+
+                # Run the live loops concurrently until shutdown (keeps the
+                # `async with self.kalshi_client` context open):
+                #  - cross-platform detection/execution (Poly<->Kalshi)
+                #  - Kalshi-native bundle-arb trading (single-venue, opt-in)
+                loops = [self._monitor_cross_platform_arbs()]
+                if self.config.mode.kalshi_native_enabled:
+                    loops.append(self._run_kalshi_trading())
+                await asyncio.gather(*loops)
     
     async def _run_matching_background(self, polymarket_markets: list) -> None:
         """Run market matching in a thread pool so dashboard stays fully responsive."""
@@ -549,7 +578,168 @@ class TradingBotWithDashboard:
             import traceback
             traceback.print_exc()
             dashboard_state.cross_platform["matching_status"] = "error"
-    
+
+    async def _monitor_cross_platform_arbs(self) -> None:
+        """
+        Continuously poll matched pairs for live cross-platform arbitrage and
+        route any opportunity to the atomic two-leg executor.
+
+        Detection/alerting always runs. Whether orders are actually placed is
+        gated by mode.cross_platform_execution_enabled (and dry_run simulates).
+        """
+        pairs = sorted(
+            self._matched_pairs or [],
+            key=lambda p: p.similarity_score,
+            reverse=True,
+        )[: self.config.monitoring.cross_platform_max_pairs]
+
+        if not pairs or not self.kalshi_client or not self.cross_platform_engine:
+            logger.info("Cross-platform monitor: no matched pairs to watch.")
+            return
+
+        self.cross_executor = CrossPlatformExecutor(
+            poly_client=self.client,
+            kalshi_client=self.kalshi_client,
+            risk_manager=self.risk_manager,
+            portfolio=self.portfolio,
+            config=CrossExecConfig(
+                dry_run=self.config.is_dry_run,
+                execution_enabled=self.config.mode.cross_platform_execution_enabled,
+                max_trade_notional=self.config.trading.cross_platform_max_trade_notional,
+            ),
+        )
+
+        poll = self.config.monitoring.cross_platform_poll_seconds
+        logger.info(
+            f"Cross-platform arb monitor started: {len(pairs)} pairs, every {poll}s "
+            f"(execution={'ON' if self.config.mode.cross_platform_execution_enabled else 'OFF — detect only'})"
+        )
+
+        while self._running:
+            found = 0
+            for pair in pairs:
+                if not self._running:
+                    break
+                try:
+                    poly_ob = await self.client.get_orderbook(pair.polymarket_id)
+                    kalshi_ob = await self.kalshi_client.get_orderbook_unified(pair.kalshi_ticker)
+                    if not poly_ob or not kalshi_ob:
+                        continue
+
+                    opp = self.cross_platform_engine.check_arbitrage(pair, poly_ob, kalshi_ob)
+                    if not opp:
+                        continue
+
+                    found += 1
+                    dashboard_state.add_cross_platform_opportunity({
+                        "poly_question": pair.polymarket_question,
+                        "kalshi_title": pair.kalshi_title,
+                        "token": opp.token,
+                        "buy_platform": opp.buy_platform,
+                        "sell_platform": opp.sell_platform,
+                        "buy_price": round(opp.buy_price, 4),
+                        "sell_price": round(opp.sell_price, 4),
+                        "net_edge": round(opp.net_edge, 4),
+                        "edge_pct": round(opp.edge_pct, 4),
+                        "suggested_size": opp.suggested_size,
+                    })
+
+                    # Full two-leg arb if enabled; else Kalshi-only directional
+                    # (oracle) leg if that's enabled; else detect-only.
+                    if self.config.mode.cross_platform_execution_enabled:
+                        result = await self.cross_executor.execute(opp)
+                        logger.info(f"Cross-platform exec [{result.status}]: {result.detail}")
+                    elif self.config.mode.kalshi_oracle_enabled:
+                        result = await self.cross_executor.execute_kalshi_leg_only(opp)
+                        logger.info(f"Kalshi oracle exec [{result.status}]: {result.detail}")
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.debug(f"Cross-platform check failed for {pair.pair_id}: {e}")
+
+                # Throttle between pairs to stay under venue rate limits.
+                await asyncio.sleep(0.15)
+
+            if found:
+                logger.info(f"Cross-platform sweep: {found} opportunities across {len(pairs)} pairs")
+            await asyncio.sleep(poll)
+
+    async def _run_kalshi_trading(self) -> None:
+        """
+        Kalshi-native single-venue bundle arbitrage (for Kalshi-only users).
+
+        Reuses the venue-agnostic ArbEngine + ExecutionEngine, pointed at Kalshi
+        order books and the Kalshi client. Detects riskless bundle arbs (YES+NO
+        priced under $1 after fees) and trades them on Kalshi alone. Simulates in
+        dry_run; places real Kalshi orders only in live mode.
+        """
+        if not self.kalshi_client or not self._kalshi_markets:
+            return
+
+        # Dedicated engines so Kalshi trading is independent of the Polymarket path.
+        self.kalshi_arb_engine = ArbEngine(ArbConfig(
+            min_edge=self.config.trading.min_edge,
+            bundle_arb_enabled=self.config.trading.bundle_arb_enabled,
+            mm_enabled=False,  # bundle arb only — riskless single-venue
+            tick_size=self.config.trading.tick_size,
+            default_order_size=self.config.trading.default_order_size,
+            min_order_size=self.config.trading.min_order_size,
+            max_order_size=self.config.trading.max_order_size,
+        ))
+        self.kalshi_execution_engine = ExecutionEngine(
+            client=self.kalshi_client,
+            risk_manager=self.risk_manager,   # shared global exposure budget
+            portfolio=self.portfolio,
+            config=ExecutionConfig(
+                slippage_tolerance=self.config.trading.slippage_tolerance,
+                order_timeout_seconds=self.config.trading.order_timeout_seconds,
+                dry_run=self.config.is_dry_run,
+            ),
+        )
+        await self.kalshi_execution_engine.start()
+
+        # Watch the most liquid Kalshi markets.
+        watched = sorted(self._kalshi_markets, key=lambda m: m.volume, reverse=True)[
+            : self.config.monitoring.kalshi_max_markets
+        ]
+        poll = self.config.monitoring.kalshi_poll_seconds
+        mode = "LIVE" if self.config.is_live else "dry_run"
+        logger.info(f"Kalshi-native bundle-arb trading started: {len(watched)} markets, every {poll}s ({mode})")
+
+        while self._running:
+            found = 0
+            for km in watched:
+                if not self._running:
+                    break
+                try:
+                    ob = await self.kalshi_client.get_orderbook_unified(km.ticker)
+                    if not ob:
+                        continue
+                    market_state = MarketState(
+                        market=Market(market_id=f"kalshi:{km.ticker}", condition_id="", question=km.title),
+                        order_book=ob,
+                    )
+                    signals = self.kalshi_arb_engine.analyze(market_state)
+                    for signal in signals:
+                        found += 1
+                        if signal.opportunity:
+                            self.dashboard_integration.add_opportunity(
+                                opportunity_type=f"kalshi_{signal.opportunity.opportunity_type.value}",
+                                market_id=signal.market_id,
+                                edge=signal.opportunity.edge,
+                                suggested_size=signal.opportunity.suggested_size,
+                            )
+                        await self.kalshi_execution_engine.submit_signal(signal)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.debug(f"Kalshi-native check failed for {km.ticker}: {e}")
+                await asyncio.sleep(0.1)
+
+            if found:
+                logger.info(f"Kalshi-native sweep: {found} bundle-arb signals across {len(watched)} markets")
+            await asyncio.sleep(poll)
+
     async def stop(self) -> None:
         """Stop everything gracefully."""
         logger.info("Shutting down...")
@@ -563,6 +753,9 @@ class TradingBotWithDashboard:
         
         if self.execution_engine:
             await self.execution_engine.stop()
+
+        if self.kalshi_execution_engine:
+            await self.kalshi_execution_engine.stop()
         
         if self.cross_monitor:
             await self.cross_monitor.stop()

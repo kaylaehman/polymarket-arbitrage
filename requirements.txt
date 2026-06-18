@@ -15,6 +15,12 @@ pydantic>=2.5.0
 # Utilities
 python-dotenv>=1.0.0
 
+# Live trading (Polymarket CLOB order signing + Kalshi RSA request auth)
+# py-clob-client handles EIP-712 order signing / L1->L2 auth for Polymarket.
+# cryptography signs Kalshi API requests (RSA-PSS). Lazy-imported; only needed in live mode.
+py-clob-client>=0.17.0
+cryptography>=42.0.0
+
 # Web Dashboard
 fastapi>=0.104.0
 uvicorn>=0.24.0

@@ -12,6 +12,7 @@ When the same prediction is priced differently on both platforms, we can:
 import asyncio
 import logging
 import re
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 from difflib import SequenceMatcher
@@ -24,6 +25,21 @@ if TYPE_CHECKING:
     from intelligence.signal import SignalSummary
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _MarketProfile:
+    """Precomputed matching features for a single market title (computed once)."""
+    norm: str                       # normalized text (for fuzzy ratio)
+    tokens: frozenset               # significant normalized tokens
+    teams: list                     # canonical team names
+    date: Optional[str]
+    entities: frozenset             # key entities (names/numbers/terms)
+    persons: frozenset              # politician/figure names mentioned
+    actions: frozenset              # win/lose/poll/... action words
+    sports_kw: frozenset            # nfl/nba/... keywords present
+    crypto_kw: frozenset            # bitcoin/eth/... keywords present
+    block_keys: frozenset           # tokens+teams used for candidate blocking
 
 
 @dataclass
@@ -415,7 +431,81 @@ class MarketMatcher:
             combined_sim = min(1.0, combined_sim + 0.2)
         
         return combined_sim
-    
+
+    # --- Optimized matching: precomputed profiles + blocking index ---------
+
+    _PERSON_PATTERNS = [
+        r'\b(trump|biden|harris|desantis|obama|pence)\b',
+        r'\b(musk|zuckerberg|bezos|gates)\b',
+        r'\b(powell|yellen)\b',
+    ]
+    _ACTION_RE = re.compile(r'\b(win|lose|approve|poll|elect|resign|indicted?|convicted?)\w*\b')
+    _SPORT_KEYWORDS = ("nfl", "nba", "mlb", "nhl", "football", "basketball", "baseball", "hockey")
+    _CRYPTO_KEYWORDS = ("bitcoin", "btc", "ethereum", "eth", "solana", "sol")
+
+    def build_profile(self, text: str) -> _MarketProfile:
+        """Compute all matching features for a title once (avoids repeated work)."""
+        text = text or ""
+        lower = text.lower()
+        norm = self.normalize_text(text)
+        tokens = frozenset(w for w in norm.split() if len(w) >= 3)
+        teams = self.extract_teams(text)
+        date = self.extract_date(text)
+        entities = frozenset(self.extract_key_entities(text))
+
+        persons = set()
+        for pat in self._PERSON_PATTERNS:
+            persons.update(re.findall(pat, lower))
+        actions = frozenset(self._ACTION_RE.findall(lower))
+
+        sports_kw = frozenset(s for s in self._SPORT_KEYWORDS if s in lower)
+        crypto_kw = frozenset(c for c in self._CRYPTO_KEYWORDS if c in lower)
+
+        # Blocking keys: discriminative tokens + team names. (Dates are too common
+        # to block on; they still factor into scoring.)
+        block_keys = frozenset(tokens | set(teams))
+
+        return _MarketProfile(
+            norm=norm, tokens=tokens, teams=teams, date=date, entities=entities,
+            persons=frozenset(persons), actions=actions,
+            sports_kw=sports_kw, crypto_kw=crypto_kw, block_keys=block_keys,
+        )
+
+    def _sports_match_profiles(self, p1: _MarketProfile, p2: _MarketProfile) -> tuple[bool, float]:
+        if len(p1.teams) >= 2 and len(p2.teams) >= 2:
+            s1, s2 = set(p1.teams[:2]), set(p2.teams[:2])
+            if s1 == s2:
+                return (True, 0.95) if self.dates_match(p1.date, p2.date) else (False, 0.3)
+            overlap = s1 & s2
+            if len(overlap) >= 1 and self.dates_match(p1.date, p2.date):
+                return True, 0.7 + (0.2 * len(overlap) / 2)
+        return False, 0.0
+
+    def _similarity_profiles(self, p1: _MarketProfile, p2: _MarketProfile) -> float:
+        """Profile-based port of calculate_similarity (identical scoring)."""
+        is_sports, sports_score = self._sports_match_profiles(p1, p2)
+        if is_sports and sports_score > 0.7:
+            return sports_score
+
+        # Same person + same action type scores 0.85 (returns early, like the
+        # original >0.7 gate). Same person, different action scores only 0.6,
+        # which is <=0.7, so it falls through to fuzzy text similarity below.
+        if p1.persons and p2.persons and (p1.persons & p2.persons) and (p1.actions & p2.actions):
+            return 0.85
+
+        text_sim = SequenceMatcher(None, p1.norm, p2.norm).ratio()
+        if p1.entities and p2.entities:
+            entity_overlap = len(p1.entities & p2.entities) / max(len(p1.entities), len(p2.entities))
+            combined = 0.5 * text_sim + 0.5 * entity_overlap
+        else:
+            combined = text_sim
+
+        if p1.sports_kw and p2.sports_kw and (p1.sports_kw & p2.sports_kw):
+            combined = min(1.0, combined + 0.15)
+        if p1.crypto_kw and p2.crypto_kw and (p1.crypto_kw & p2.crypto_kw):
+            combined = min(1.0, combined + 0.2)
+        return combined
+
     def _categorize_market(self, text: str) -> str:
         """Detect category from market text. Order matters - check politics before sports!"""
         text_lower = text.lower()
@@ -514,54 +604,72 @@ class MarketMatcher:
             for cat in set(list(poly_by_cat.keys()) + list(kalshi_by_cat.keys()))
         )
         
-        logger.info(f"Total comparisons (category-based): {total_comparisons:,}")
+        logger.info(f"Brute-force comparisons avoided (category-based): {total_comparisons:,}")
         logger.info(f"(vs {len(active_poly) * len(active_kalshi):,} if matching all-to-all)")
-        
-        checked = 0
-        
+        logger.info("Using blocking index — only candidate pairs sharing a token/team are scored.")
+
+        checked = 0  # actual similarity computations (candidate pairs only)
+
         # Match within each category (skip 'other' - too noisy)
         priority_categories = ['sports', 'politics', 'crypto', 'finance', 'entertainment', 'tech']
-        
+
         for category in priority_categories:
             poly_markets = poly_by_cat.get(category, [])
             kalshi_markets_cat = kalshi_by_cat.get(category, [])
-            
+
             if not poly_markets or not kalshi_markets_cat:
                 continue
-            
-            logger.info(f"Matching {category}: {len(poly_markets)} x {len(kalshi_markets_cat)}")
-            
+
+            # Precompute Kalshi profiles ONCE for this category.
+            kalshi_profiles = [self.build_profile(m.title) for m in kalshi_markets_cat]
+
+            # Build an inverted index: block-key -> kalshi indices, pruning
+            # non-discriminative keys (those appearing in too many titles) so
+            # candidate sets stay small.
+            df: dict = defaultdict(int)
+            for prof in kalshi_profiles:
+                for key in prof.block_keys:
+                    df[key] += 1
+            max_df = max(100, len(kalshi_profiles) // 10)
+            index: dict = defaultdict(list)
+            for idx, prof in enumerate(kalshi_profiles):
+                for key in prof.block_keys:
+                    if df[key] <= max_df:
+                        index[key].append(idx)
+
+            logger.info(
+                f"Matching {category}: {len(poly_markets)} poly x {len(kalshi_markets_cat)} kalshi "
+                f"(index keys={len(index)}, max_df={max_df})"
+            )
+
             for poly_market in poly_markets:
+                pprof = self.build_profile(poly_market.question)
+
+                # Gather candidate Kalshi markets sharing at least one block key.
+                candidates = set()
+                for key in pprof.block_keys:
+                    postings = index.get(key)
+                    if postings:
+                        candidates.update(postings)
+
                 best_match = None
                 best_score = 0.0
-                
-                for kalshi_market in kalshi_markets_cat:
-                    score = self.calculate_similarity(
-                        poly_market.question,
-                        kalshi_market.title
-                    )
-                    
+                for idx in candidates:
+                    score = self._similarity_profiles(pprof, kalshi_profiles[idx])
                     if score > best_score:
                         best_score = score
-                        best_match = kalshi_market
-                    
+                        best_match = kalshi_markets_cat[idx]
                     checked += 1
-                
-                # Yield VERY frequently to keep event loop responsive
-                if checked % 500 == 0:
-                    await asyncio.sleep(0.01)  # Small sleep to let web requests through
-                    pct = (checked / total_comparisons * 100) if total_comparisons > 0 else 0
-                    
-                    if checked % 5000 == 0:
-                        logger.info(f"Progress: {checked:,}/{total_comparisons:,} ({pct:.1f}%) - {len(matches)} matches")
-                    
+
+                # Yield periodically to keep the event loop responsive.
+                if checked % 2000 < len(candidates):  # crossed a 2000 boundary
+                    await asyncio.sleep(0)
                     if on_progress:
                         try:
                             on_progress(checked, total_comparisons, len(matches))
-                        except:
+                        except Exception:
                             pass
-                
-                # After checking all Kalshi markets for this Poly market
+
                 if best_match and best_score >= self.min_similarity:
                     pair = MarketPair(
                         polymarket_id=poly_market.market_id,
@@ -573,13 +681,16 @@ class MarketMatcher:
                     )
                     matches.append(pair)
                     self._matched_pairs[pair.pair_id] = pair
-                    
+
                     logger.info(
                         f"MATCHED [{category}]: '{poly_market.question[:35]}...' <-> '{best_match.title[:35]}...' "
                         f"(score: {best_score:.2f})"
                     )
-        
-        logger.info(f"=== MATCHING COMPLETE: {len(matches)} pairs found ===")
+
+            # Let the loop breathe between categories.
+            await asyncio.sleep(0)
+
+        logger.info(f"=== MATCHING COMPLETE: {len(matches)} pairs found ({checked:,} candidate comparisons) ===")
         return matches
     
     def get_cached_pairs(self) -> list[MarketPair]:

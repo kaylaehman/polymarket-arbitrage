@@ -29,6 +29,20 @@ class ApiConfig:
     api_secret: str = ""
     passphrase: str = ""
     private_key: str = ""
+
+    # Polymarket wallet type for CLOB signing:
+    #   0 = EOA (you hold the private key directly) -- default
+    #   1 = email/magic (Polymarket-hosted) proxy wallet
+    #   2 = browser (MetaMask) proxy wallet
+    # For proxy types (1/2), funder = the wallet address that holds USDC.
+    signature_type: int = 0
+    funder: str = ""
+
+    # Kalshi trading credentials (RSA key pair created in the Kalshi web UI).
+    # Market-data reads need no auth; placing/cancelling orders does.
+    kalshi_api_key_id: str = ""      # the key UUID shown in Kalshi settings
+    kalshi_private_key: str = ""     # RSA private key PEM (full text, or path via env)
+
     timeout_seconds: float = 30.0
     max_retries: int = 3
     retry_delay_seconds: float = 1.0
@@ -55,6 +69,8 @@ class TradingConfig:
     # Time-decay edge discounting (FEAT-07)
     time_decay_enabled: bool = False
     skip_if_resolves_within_hours: float = 12.0
+    # Max $ committed across BOTH legs of one cross-platform arb trade.
+    cross_platform_max_trade_notional: float = 15.0
 
 
 @dataclass
@@ -80,6 +96,18 @@ class ModeConfig:
     cross_platform_enabled: bool = True  # Enable cross-platform arbitrage (Polymarket + Kalshi)
     kalshi_enabled: bool = True  # Enable Kalshi market monitoring
     min_match_similarity: float = 0.6  # Minimum similarity score for market matching (0-1)
+    # Hard gate: actually PLACE cross-platform orders (vs detect-and-alert only).
+    # Even in live mode this stays off until you explicitly enable it.
+    cross_platform_execution_enabled: bool = False
+
+    # Kalshi-only operation (for users who can trade Kalshi but not Polymarket):
+    # kalshi_native_enabled runs single-venue bundle-arb detection/trading on
+    # Kalshi order books (riskless; YES+NO < $1). kalshi_oracle_enabled also takes
+    # the DIRECTIONAL Kalshi leg of a cross-platform gap using Polymarket as a
+    # price oracle (NOT riskless — carries event risk). Both simulate in dry_run
+    # and only place real orders in live mode.
+    kalshi_native_enabled: bool = False
+    kalshi_oracle_enabled: bool = False
     dry_run_initial_balance: float = 10000.0
     simulate_fills: bool = True
     fill_probability: float = 0.8
@@ -105,6 +133,12 @@ class MonitoringConfig:
     heartbeat_interval: float = 30.0
     track_latency: bool = True
     track_fill_rates: bool = True
+    # Cross-platform arb monitoring loop
+    cross_platform_poll_seconds: float = 30.0   # seconds between full sweeps of matched pairs
+    cross_platform_max_pairs: int = 60          # cap on matched pairs polled (rate-limit guard)
+    # Kalshi-native bundle-arb loop
+    kalshi_poll_seconds: float = 10.0           # seconds between sweeps of watched Kalshi markets
+    kalshi_max_markets: int = 100               # cap on Kalshi markets watched (by volume)
 
 
 @dataclass
@@ -224,7 +258,16 @@ def load_config(config_path: str = "config.yaml") -> BotConfig:
         "api_secret": "POLYMARKET_API_SECRET",
         "passphrase": "POLYMARKET_PASSPHRASE",
         "private_key": "POLYMARKET_PRIVATE_KEY",
+        "funder": "POLYMARKET_FUNDER",
+        "kalshi_api_key_id": "KALSHI_API_KEY_ID",
+        "kalshi_private_key": "KALSHI_PRIVATE_KEY",
     })
+
+    # KALSHI_PRIVATE_KEY may point at a PEM file rather than hold the key inline.
+    kalshi_pk = api_data.get("kalshi_private_key", "")
+    if kalshi_pk and "BEGIN" not in kalshi_pk and os.path.isfile(kalshi_pk):
+        with open(kalshi_pk, "r") as f:
+            api_data["kalshi_private_key"] = f.read()
     
     # Build config objects
     config = BotConfig(
@@ -312,10 +355,19 @@ def _validate_config(config: BotConfig) -> None:
     
     # Live mode checks
     if config.is_live:
-        if not config.api.api_key or config.api.api_key == "YOUR_API_KEY_HERE":
-            errors.append("api.api_key is required for live trading")
         if not config.api.private_key or config.api.private_key == "YOUR_PRIVATE_KEY_HERE":
-            errors.append("api.private_key is required for live trading")
+            errors.append("api.private_key is required for live trading (Polygon wallet key)")
+        if config.api.signature_type not in (0, 1, 2):
+            errors.append("api.signature_type must be 0 (EOA), 1 (email proxy), or 2 (browser proxy)")
+        if config.api.signature_type in (1, 2) and not config.api.funder:
+            errors.append("api.funder (USDC-holding address) is required when signature_type is 1 or 2")
+
+        # Kalshi creds only required if we actually trade the Kalshi leg.
+        if config.mode.kalshi_enabled and config.mode.cross_platform_enabled:
+            if not config.api.kalshi_api_key_id:
+                errors.append("api.kalshi_api_key_id is required for live Kalshi trading")
+            if not config.api.kalshi_private_key or "BEGIN" not in config.api.kalshi_private_key:
+                errors.append("api.kalshi_private_key must be an RSA PEM for live Kalshi trading")
     
     if errors:
         raise ConfigError("Configuration validation failed:\n" + "\n".join(f"  - {e}" for e in errors))

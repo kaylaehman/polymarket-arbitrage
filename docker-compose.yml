@@ -1,0 +1,24 @@
+services:
+  polymarket-arb:
+    build: .
+    image: polymarket-arb:local
+    container_name: polymarket-arb
+    restart: unless-stopped
+    # Secrets come from a gitignored .env (copy .env.example). Empty/missing .env
+    # is fine — the bot falls back to config.yaml and stays in dry_run.
+    env_file:
+      - .env
+    ports:
+      # host:container — dashboard. LAN-only (not exposed via Cloudflare).
+      - "8899:8888"
+    volumes:
+      # Mount config so creds/mode can be changed without rebuilding the image.
+      - ./config.yaml:/app/config.yaml
+      # Persist logs outside the container.
+      - ./logs:/app/logs
+      # Drop secrets here (e.g. Kalshi kalshi.pem) and point KALSHI_PRIVATE_KEY
+      # at /app/secrets/<file>. Directory is gitignored.
+      - ./secrets:/app/secrets:ro
+    # Dry-run is baked into config.yaml (mode.trading_mode: dry_run).
+    # To go live: see GOING-LIVE.md, then either flip config.yaml or append --live here.
+    command: ["python", "run_with_dashboard.py", "--config", "config.yaml", "--port", "8888"]
