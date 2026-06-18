@@ -38,6 +38,12 @@ from difflib import SequenceMatcher
 from typing import TYPE_CHECKING, Optional
 
 from polymarket_client.models import Market, OrderBook, Opportunity, OpportunityType
+from core.market_identity_macro import (
+    MacroPoliticsIdentity,
+    from_polymarket_macro,
+    from_kalshi_macro,
+    llm_equivalence_check,
+)
 
 if TYPE_CHECKING:
     # Type-only import; core never hard-imports the intelligence layer.
@@ -219,12 +225,14 @@ class _MarketIdentity:
     }
 
     def __init__(self, sport: str, teams: frozenset, event_date: Optional[date],
-                 market_type: str, winner_team: Optional[str] = None):
-        self.sport = sport           # "nfl", "nba", "mlb", "soccer", "other"
+                 market_type: str, winner_team: Optional[str] = None,
+                 macro_id: Optional["MacroPoliticsIdentity"] = None):
+        self.sport = sport           # "nfl", "nba", "mlb", "soccer", "macro", "politics", "other"
         self.teams = teams           # frozenset of normalized team names
         self.event_date = event_date # date or None
         self.market_type = market_type
         self.winner_team = winner_team  # for game-winner markets: which team YES represents
+        self.macro_id = macro_id     # set for macro/politics markets; None for sports
 
     @classmethod
     def from_kalshi(cls, ticker: str, title: str) -> Optional["_MarketIdentity"]:
@@ -281,6 +289,19 @@ class _MarketIdentity:
             return cls(sport='mlb', teams=teams, event_date=None,
                        market_type='tournament_winner', winner_team=None)
 
+        # Macro / politics markets (KXFEDDECISION, KXSENATE, KXHOUSE, …)
+        macro = from_kalshi_macro(ticker, title)
+        if macro is not None:
+            sport = 'politics' if macro.market_type == 'politics_control' else 'macro'
+            return cls(
+                sport=sport,
+                teams=frozenset(),
+                event_date=macro.event_date,
+                market_type=macro.market_type,
+                winner_team=None,
+                macro_id=macro,
+            )
+
         # Crypto price markets (KXXRPD etc): don't try to match with PM.US
         if re.match(r'^KX[A-Z]{2,5}D?-', ticker):
             return None
@@ -323,6 +344,19 @@ class _MarketIdentity:
             country = wc.group('country').strip().lower()
             return cls(sport='soccer', teams=frozenset([country]), event_date=None,
                        market_type='tournament_winner', winner_team=None)
+
+        # Macro / politics markets
+        macro = from_polymarket_macro(market_id, question, category)
+        if macro is not None:
+            sport = 'politics' if macro.market_type == 'politics_control' else 'macro'
+            return cls(
+                sport=sport,
+                teams=frozenset(),
+                event_date=macro.event_date,
+                market_type=macro.market_type,
+                winner_team=None,
+                macro_id=macro,
+            )
 
         # For other market types we cannot yet extract a precise structured identity
         return None
@@ -379,7 +413,10 @@ class _MarketIdentity:
         Compare two market identities.
 
         Returns (is_match, confidence, reason_string).
-        All four criteria must agree; any mismatch returns False immediately.
+        All criteria must agree; any mismatch returns False immediately.
+
+        For macro/politics markets (macro_id set on both), delegates to
+        MacroPoliticsIdentity.matches() which handles the schema-specific logic.
         """
         # 1. Sport must match exactly
         if self.sport != other.sport:
@@ -391,7 +428,11 @@ class _MarketIdentity:
                 f"market_type mismatch: {self.market_type!r} vs {other.market_type!r}"
             )
 
-        # 3. Teams must agree (full intersection for game_winner)
+        # 3a. Macro/politics: delegate to MacroPoliticsIdentity.matches()
+        if self.macro_id is not None and other.macro_id is not None:
+            return self.macro_id.matches(other.macro_id)
+
+        # 3b. Sports: Teams must agree (full intersection for game_winner)
         if self.market_type == 'game_winner':
             if not self.teams or not other.teams:
                 return False, 0.0, "missing teams"
@@ -667,8 +708,14 @@ class MarketMatcher:
         Attempt a STRUCTURED IDENTITY match between one PM.US and one Kalshi market.
 
         Returns a MarketPair if and only if the markets represent the same
-        underlying binary event, with all four criteria (sport, market type,
-        teams, event date) in agreement.  Returns None otherwise.
+        underlying binary event, with all criteria in agreement.  Returns None
+        otherwise.
+
+        For macro/politics markets the outcome mapping is always YES==YES because:
+          - Fed Decision: PM.US "maintains" slug vs Kalshi H0 both mean "Fed holds";
+            YES on each side resolves identically.
+          - Politics: PM.US "-rep" slug vs Kalshi "-R" market; YES on each means
+            "Republicans win the chamber".
         """
         # Parse Kalshi identity — reject KXMV parlays immediately
         kalshi_id = _MarketIdentity.from_kalshi(
@@ -688,20 +735,13 @@ class MarketMatcher:
         if not is_match:
             return None
 
-        # Determine outcome mapping:
-        # For game_winner: Kalshi YES = "Will X win?" where X = kalshi_id.winner_team
-        # PM.US game_winner: market sides are team1 vs team2; YES = team listed first in slug
-        # We need to know if Kalshi YES corresponds to PM.US YES.
-        #
-        # PM.US aec-nfl-T1-T2-date: question "T1 vs T2", YES = T1 wins
-        # Kalshi KXNFLGAME-...-WINNER: title "Will WINNER win...", YES = WINNER wins
-        #
-        # If kalshi_id.winner_team == poly's T1 (first team in slug), then
-        # Kalshi YES == PM.US YES.  Otherwise Kalshi YES == PM.US NO.
+        # Determine outcome mapping for sports game-winners:
+        # PM.US aec-nfl-T1-T2-date: YES = T1 wins
+        # Kalshi KXNFLGAME-...-WINNER: YES = WINNER wins
+        # If kalshi_id.winner_team == PM.US T1, Kalshi YES == PM.US YES.
         kalshi_yes_maps_to_poly_yes = True
         if (kalshi_id.market_type == 'game_winner' and kalshi_id.winner_team
                 and kalshi_id.sport in ('nfl', 'nba', 'mlb')):
-            # Determine PM.US YES team from slug
             mid = poly_market.market_id.lower()
             for pattern in [
                 _MarketIdentity._POLY_NFL_SLUG,
@@ -714,6 +754,9 @@ class MarketMatcher:
                     t1_norm = _MarketIdentity._NFL_ABBREVS.get(t1_abbrev, t1_abbrev)
                     kalshi_yes_maps_to_poly_yes = (kalshi_id.winner_team == t1_norm)
                     break
+        # For macro/politics markets the structural match guarantees same-action,
+        # so YES always maps to YES (both sides independently encode the same outcome
+        # token — "maintains", "cut25bps", "republican", etc.).
 
         pair = MarketPair(
             polymarket_id=poly_market.market_id,
@@ -732,6 +775,7 @@ class MarketMatcher:
         polymarket_markets: list[Market],
         kalshi_markets: list,   # list[KalshiMarket]
         on_progress: Optional[callable] = None,
+        llm_gate=None,          # Optional AIAnalyzer for equivalence confirmation
     ) -> list[MarketPair]:
         """
         Find matching markets between platforms using STRUCTURED IDENTITY only.
@@ -824,6 +868,25 @@ class MarketMatcher:
                 if is_match:
                     pair = self._try_structured_match(poly_market, km)
                     if pair:
+                        # Optional LLM equivalence gate for macro/politics pairs.
+                        # If the gate is configured and returns equivalent=False,
+                        # we skip the pair (false hedge prevention).
+                        # Gate errors always degrade to accepting the structural match.
+                        if llm_gate is not None and pid.macro_id is not None:
+                            llm_ok, llm_yes_map, llm_reason = await llm_equivalence_check(
+                                poly_market.question, km.title, llm_gate
+                            )
+                            if not llm_ok:
+                                logger.info(
+                                    f"LLM gate rejected structural match: "
+                                    f"'{poly_market.question[:50]}' <-> '{km.title[:50]}' | "
+                                    f"{llm_reason}"
+                                )
+                                continue
+                            # LLM may refine the YES mapping
+                            pair.kalshi_yes_maps_to_poly_yes = llm_yes_map
+                            pair.match_reason = f"{reason} | LLM: {llm_reason}"
+
                         matches.append(pair)
                         self._matched_pairs[pair.pair_id] = pair
                         logger.info(
