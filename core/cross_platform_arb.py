@@ -15,9 +15,13 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from difflib import SequenceMatcher
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from polymarket_client.models import Market, OrderBook, Opportunity, OpportunityType
+
+if TYPE_CHECKING:
+    # Type-only import; core never hard-imports the intelligence layer.
+    from intelligence.signal import SignalSummary
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +75,11 @@ class CrossPlatformOpportunity:
     
     # Metadata
     detected_at: datetime = field(default_factory=datetime.utcnow)
-    
+
+    # [Intelligence] Advisory AI signal — None if disabled/timed out. Annotate-only;
+    # cross-platform arbs are flagged for human review, never auto-traded.
+    signal: "Optional[SignalSummary]" = field(default=None, repr=False)
+
     def __str__(self) -> str:
         return (
             f"CrossPlatformArb: Buy {self.token} on {self.buy_platform} @ ${self.buy_price:.3f}, "

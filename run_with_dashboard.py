@@ -62,6 +62,8 @@ class TradingBotWithDashboard:
         self.market_matcher = None
         self._kalshi_markets = []
         self._matched_pairs = []
+        self.cross_monitor = None
+        self._monitor_kalshi = None
 
         # Intelligence layer (optional, annotate-only)
         self.intelligence_engine = None
@@ -468,6 +470,30 @@ class TradingBotWithDashboard:
             dashboard_state.cross_platform["matched_pairs"] = len(self._matched_pairs)
             
             logger.info(f"✓ Matching complete! Found {len(self._matched_pairs)} pairs")
+
+            # Start live cross-platform arb monitoring (annotate-only, human review).
+            # Uses a dedicated long-lived Kalshi client for orderbook polling.
+            try:
+                from kalshi_client import KalshiClient
+                from core.cross_platform_monitor import CrossPlatformMonitor
+                self._monitor_kalshi = KalshiClient(
+                    timeout=self.config.api.timeout_seconds, dry_run=self.config.is_dry_run,
+                )
+                await self._monitor_kalshi.__aenter__()
+                self.cross_monitor = CrossPlatformMonitor(
+                    engine=self.cross_platform_engine,
+                    data_feed=self.data_feed,
+                    kalshi_client=self._monitor_kalshi,
+                    get_pairs=lambda: self._matched_pairs,
+                    intelligence_engine=self.intelligence_engine,
+                    intel_enabled=self.config.intelligence.enabled,
+                    signal_db=self.signal_db,
+                    dashboard=dashboard_state,
+                )
+                await self.cross_monitor.start()
+                logger.info("[CrossMonitor] Live cross-platform arb monitoring started")
+            except Exception as e:
+                logger.warning(f"[CrossMonitor] failed to start: {e}")
             
             # Prepare matched pairs data for dashboard display
             matched_pairs_display = []
@@ -501,6 +527,15 @@ class TradingBotWithDashboard:
         if self.execution_engine:
             await self.execution_engine.stop()
         
+        if self.cross_monitor:
+            await self.cross_monitor.stop()
+
+        if self._monitor_kalshi:
+            try:
+                await self._monitor_kalshi.__aexit__(None, None, None)
+            except Exception:
+                pass
+
         if self.outcome_poller:
             await self.outcome_poller.stop()
 
