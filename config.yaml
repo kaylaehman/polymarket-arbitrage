@@ -129,7 +129,7 @@ mode:
   kalshi_oracle_enabled: false
 
   # Polymarket.US venue. Disabled by default -- set to true + provide creds to enable.
-  polymarket_us_enabled: false
+  polymarket_us_enabled: true
   
   # Dry run settings
   dry_run_initial_balance: 10000
@@ -199,7 +199,7 @@ intelligence:
 # surface is fully disabled (503) without it. Destructive actions need confirm.
 agent:
   enabled: true              # Mount /api/agent (read-only; allow_control=false)
-  allow_control: false       # Allow pause/kill endpoints (read-only when false)
+  allow_control: true        # Allow pause/kill endpoints (OpenClaw control enabled)
 
 # ── Signal Database (SQLite, append-only) ─────────────────────────────────────
 # Persists signals + opportunities so AI calibration can be measured over time.
