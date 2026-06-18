@@ -74,6 +74,3 @@ config.live.yaml
 # Tool artifacts (ruflo/ruvector local DB — not source)
 ruvector.db
 
-# Local agent/session scratch
-.remember/
-
