@@ -579,6 +579,74 @@ class KalshiClient:
         next_cursor = data.get("cursor")
         return markets, next_cursor
     
+    # Individual-market series that can overlap with PM.US politics/macro markets.
+    # These are fetched separately because they are buried far beyond the KXMV parlay
+    # wall in the default cursor-paginated listing (first ~13 000 open markets are all
+    # KXMV parlays).  Fetching by series_ticker is O(1) roundtrips per series and
+    # guarantees individual binary markets are present in the returned set regardless
+    # of where Kalshi's cursor ordering places them.
+    #
+    # Series taxonomy confirmed by inspecting /series endpoint (10 955 total series):
+    #   Economics: KXFED, KXCPI, KXCPIYOY, KXGDP, KXPCECORE, KXCPICORE, KXCPICOREYOY
+    #   Politics:  KXSENATE, KXHOUSE  (control markets — currently 0 open, midterms are
+    #              scheduled Nov 2026 so they will appear before election day)
+    _INDIVIDUAL_SERIES: tuple[str, ...] = (
+        # Economics / macro
+        "KXFED",           # Fed funds rate ladders
+        "KXFEDDECISION",   # Hike/cut per meeting (most current overlap point)
+        "KXCPI",           # Monthly CPI MoM
+        "KXCPIYOY",        # CPI YoY
+        "KXCPICORE",       # Core CPI MoM
+        "KXCPICOREYOY",    # Core CPI YoY
+        "KXPCECORE",       # Core PCE
+        "KXGDP",           # Quarterly GDP
+        "KXGDPYEAR",       # Annual GDP
+        # Politics
+        "KXSENATE",        # Senate control (0 open now; midterms open pre-election)
+        "KXHOUSE",         # House control (same)
+    )
+
+    async def _fetch_individual_series_markets(
+        self,
+        status: str = "open",
+    ) -> list[KalshiMarket]:
+        """
+        Fetch markets from known individual-binary series (politics + macro).
+
+        These series are buried far into the default cursor listing behind ~13 000
+        KXMV parlay tickets.  Fetching by series_ticker gives O(1) API calls per
+        series and is NOT steady-state polling load — it runs once at startup as
+        part of the market-list fetch, not during the orderbook poll loop.
+        """
+        seen_tickers: set[str] = set()
+        result: list[KalshiMarket] = []
+
+        for series_ticker in self._INDIVIDUAL_SERIES:
+            try:
+                markets, _ = await self.list_markets(
+                    status=status,
+                    series_ticker=series_ticker,
+                    limit=1000,
+                )
+                for m in markets:
+                    if m.ticker not in seen_tickers:
+                        seen_tickers.add(m.ticker)
+                        result.append(m)
+                if markets:
+                    logger.info(
+                        f"[Kalshi] series {series_ticker}: {len(markets)} open markets"
+                    )
+                await asyncio.sleep(0.3)
+            except Exception as exc:
+                logger.warning(
+                    f"[Kalshi] failed to fetch series {series_ticker}: {exc}"
+                )
+
+        logger.info(
+            f"[Kalshi] individual-series fetch: {len(result)} unique individual markets"
+        )
+        return result
+
     async def list_all_markets(
         self,
         status: str = "open",
@@ -586,48 +654,87 @@ class KalshiClient:
         on_progress: callable = None,  # Callback for progress updates
     ) -> list[KalshiMarket]:
         """
-        Fetch all markets with pagination.
-        
-        Args:
-            status: Market status filter
-            max_markets: Maximum total markets to fetch
-            on_progress: Optional callback(loaded_count) for progress updates
-            
-        Returns:
-            List of all markets
+        Fetch all markets with pagination, then append individual political/macro
+        markets fetched by series_ticker so they are never crowded out by KXMV parlays.
+
+        The first ~13 000 open markets returned by the default cursor are all KXMV
+        parlay combo tickets.  Individual binary markets (KXFED, KXCPI, KXSENATE, etc.)
+        appear only much later or are most efficiently retrieved by series_ticker.
+
+        Strategy:
+          1. Paginate the default listing up to max_markets (captures parlays + whatever
+             individual markets fall in the window — used by the Kalshi-native bundle arb).
+          2. Separately fetch each known individual series (see _INDIVIDUAL_SERIES).
+          3. Merge, de-duplicate by ticker.
+
+        Steady-state poll load is UNCHANGED: only the one-time startup market-list
+        fetch is larger; the orderbook poll loop only touches the matched subset.
         """
-        all_markets = []
+        all_markets: list[KalshiMarket] = []
+        seen_tickers: set[str] = set()
         cursor = None
-        
+
         while len(all_markets) < max_markets:
             markets, next_cursor = await self.list_markets(
                 status=status,
                 limit=1000,
                 cursor=cursor,
             )
-            
+
             if not markets:
                 break
-            
-            all_markets.extend(markets)
+
+            for m in markets:
+                if m.ticker not in seen_tickers:
+                    seen_tickers.add(m.ticker)
+                    all_markets.append(m)
+
             logger.info(f"Kalshi: {len(all_markets)} markets loaded...")
-            
-            # Report progress
+
             if on_progress:
                 try:
                     on_progress(len(all_markets))
-                except:
+                except Exception:
                     pass
-            
+
             if not next_cursor:
                 break
             cursor = next_cursor
-            
-            # Small delay to avoid rate limiting
+
             await asyncio.sleep(0.2)
-        
-        logger.info(f"Kalshi: {len(all_markets)} total markets loaded ✓")
-        return all_markets[:max_markets]
+
+        # Append individual political/macro markets from known series.
+        # These are ALWAYS included even when the cursor loop filled max_markets
+        # with KXMV parlays — they must not be crowded out by the [:max_markets]
+        # cap.  We therefore collect them first, then decide which parlay/cursor
+        # markets to drop so the total stays at max_markets.
+        individual = await self._fetch_individual_series_markets(status=status)
+        new_individual: list[KalshiMarket] = []
+        for m in individual:
+            if m.ticker not in seen_tickers:
+                seen_tickers.add(m.ticker)
+                new_individual.append(m)
+
+        individual_count = len(new_individual)
+
+        if new_individual:
+            # Trim cursor-derived markets to make room so total <= max_markets
+            budget = max_markets - individual_count
+            trimmed = all_markets[:budget] if budget >= 0 else []
+            all_markets = trimmed + new_individual
+        # (if no new individual markets, all_markets is already correct)
+
+        logger.info(
+            f"Kalshi: {len(all_markets)} total markets loaded "
+            f"({individual_count} from individual series) ✓"
+        )
+        if on_progress:
+            try:
+                on_progress(len(all_markets))
+            except Exception:
+                pass
+
+        return all_markets
     
     async def get_market(self, ticker: str) -> Optional[KalshiMarket]:
         """

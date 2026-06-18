@@ -332,3 +332,151 @@ class TestMarketParsing:
         raw = {"slug": "test", "question": "Test question?"}
         market = client._parse_market(raw)
         assert market.question == "Test question?"
+
+
+# ─── 6. Paginated list_markets ────────────────────────────────────────────────
+
+class TestListMarketsPagination:
+    """
+    Tests for the new paginated list_markets() implementation.
+
+    All tests mock _public_request so no network calls are made.
+    """
+
+    def _run(self, coro):
+        return asyncio.get_event_loop().run_until_complete(coro)
+
+    def _make_page(self, count: int, offset: int = 0, category: str = "sports") -> dict:
+        markets = [
+            {
+                "slug": f"market-{offset + i}",
+                "question": f"Question {offset + i}?",
+                "active": True,
+                "closed": False,
+                "category": category,
+            }
+            for i in range(count)
+        ]
+        return {"markets": markets}
+
+    def test_single_page_returns_all(self):
+        """One real page followed by empty — stops after 2 requests."""
+        client = _make_client()
+        calls = []
+
+        async def mock_public_request(path, params=None):
+            calls.append(dict(params or {}))
+            if len(calls) == 1:
+                return self._make_page(50, 0)
+            return {"markets": []}  # empty second page signals end
+
+        client._public_request = mock_public_request
+        markets = self._run(
+            client.list_markets(max_markets=500, page_size=500, page_delay=0)
+        )
+        assert len(markets) == 50
+
+    def test_multi_page_pagination(self):
+        """Pages with a short mid-stream page (gap) and a terminal empty page."""
+        client = _make_client()
+        page_size = 100
+        # Page 0: 100, Page 1: 80 (gap/short mid-stream), Page 2: 100, Page 3: empty
+        pages = [
+            self._make_page(100, 0),
+            self._make_page(80, 100),   # short mid-stream — should NOT stop here
+            self._make_page(100, 200),
+            {"markets": []},            # empty terminal page
+        ]
+        call_idx = [0]
+
+        async def mock_public_request(path, params=None):
+            idx = call_idx[0]
+            call_idx[0] += 1
+            return pages[idx] if idx < len(pages) else {"markets": []}
+
+        client._public_request = mock_public_request
+        markets = self._run(
+            client.list_markets(max_markets=1000, page_size=page_size, page_delay=0)
+        )
+        assert len(markets) == 280  # 100 + 80 + 100
+
+    def test_max_markets_cap_respected(self):
+        """max_markets limits total even when more pages exist."""
+        client = _make_client()
+        call_count = [0]
+
+        async def mock_public_request(path, params=None):
+            call_count[0] += 1
+            # Offset determines page
+            offset = (params or {}).get("offset", 0)
+            return self._make_page(500, offset)
+
+        client._public_request = mock_public_request
+        markets = self._run(
+            client.list_markets(max_markets=750, page_size=500, page_delay=0)
+        )
+        assert len(markets) == 750  # capped at max_markets
+
+    def test_429_handled_gracefully(self):
+        """A 429/exception stops pagination without raising."""
+        import httpx
+
+        client = _make_client()
+        calls = [0]
+
+        async def mock_public_request(path, params=None):
+            calls[0] += 1
+            if calls[0] == 1:
+                return self._make_page(500, 0)
+            raise httpx.HTTPStatusError(
+                "Rate limited",
+                request=None,
+                response=MagicMock(status_code=429),
+            )
+
+        client._public_request = mock_public_request
+        markets = self._run(
+            client.list_markets(max_markets=3000, page_size=500, page_delay=0)
+        )
+        # Got first page before 429 — returns partial result gracefully
+        assert len(markets) == 500
+
+    def test_empty_first_page_returns_empty_list(self):
+        """If the first page is empty, return []."""
+        client = _make_client()
+
+        async def mock_public_request(path, params=None):
+            return {"markets": []}
+
+        client._public_request = mock_public_request
+        markets = self._run(
+            client.list_markets(max_markets=500, page_size=500, page_delay=0)
+        )
+        assert markets == []
+
+    def test_categories_preserved(self):
+        """Category field from raw response propagates to Market.category."""
+        client = _make_client()
+        calls = [0]
+
+        async def mock_public_request(path, params=None):
+            calls[0] += 1
+            if calls[0] == 1:
+                return {
+                    "markets": [
+                        {"slug": "pol-1", "question": "Will House flip?", "active": True,
+                         "closed": False, "category": "politics"},
+                        {"slug": "mac-1", "question": "Fed decision?", "active": True,
+                         "closed": False, "category": "macro"},
+                    ]
+                }
+            return {"markets": []}  # empty second page signals end
+
+        client._public_request = mock_public_request
+        markets = self._run(
+            client.list_markets(max_markets=100, page_size=500, page_delay=0)
+        )
+        assert len(markets) == 2
+        categories = {m.category for m in markets}
+        assert "politics" in categories
+        assert "macro" in categories

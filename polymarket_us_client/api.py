@@ -119,13 +119,70 @@ class PolymarketUSClient(BasePolymarketClient):
 
     # ── Market data ────────────────────────────────────────────────────────────
 
-    async def list_markets(self, filters: Optional[dict] = None) -> list[Market]:
-        params: dict = {"limit": 100, "offset": 0}
+    async def list_markets(
+        self,
+        filters: Optional[dict] = None,
+        max_markets: int = 15000,
+        page_size: int = 500,
+        page_delay: float = 0.4,
+    ) -> list[Market]:
+        """
+        Fetch ALL active PM.US markets across all categories via paginated gateway.
+
+        Paginates /v1/markets in steps of `page_size` until the API returns an
+        empty page or `max_markets` is reached.  A small async delay between
+        pages avoids Cloudflare 429s (PM.US rate-limits aggressively).
+
+        Default max_markets is 15 000 — this is deliberately high because the
+        PM.US gateway orders markets by internal integer ID (ascending), and
+        non-sports categories (politics, macro, culture) appear starting around
+        offset 7000-13 000.  With a 3 000 cap only sports markets are returned.
+        15 000 captures sports + culture + politics + macro in one sweep while
+        keeping total fetch time under ~20 s at the 0.4 s inter-page delay.
+
+        Returns list[Market] with the same shape as the previous single-page
+        version, so all callers remain unaffected.
+        """
+        page_size = min(page_size, 500)  # gateway hard-max is 500
+        base_params: dict = {"limit": page_size}
         if filters:
-            params.update(filters)
-        data = await self._public_request("/v1/markets", params)
-        markets_raw = data if isinstance(data, list) else data.get("markets", data.get("data", []))
-        return [self._parse_market(m) for m in markets_raw]
+            base_params.update(filters)
+
+        all_markets: list[Market] = []
+        offset = 0
+
+        while len(all_markets) < max_markets:
+            params = {**base_params, "offset": offset}
+            try:
+                data = await self._public_request("/v1/markets", params)
+            except Exception as exc:
+                # 429 or network error: stop gracefully rather than crash
+                logger.warning(
+                    f"[PolymarketUS] list_markets stopped at offset={offset}: {exc}"
+                )
+                break
+
+            raw_list = (
+                data if isinstance(data, list)
+                else data.get("markets", data.get("data", []))
+            )
+            if not raw_list:
+                break  # reached end of data
+
+            all_markets.extend(self._parse_market(m) for m in raw_list)
+            logger.debug(
+                f"[PolymarketUS] list_markets: offset={offset} "
+                f"page={len(raw_list)} total={len(all_markets)}"
+            )
+            offset += page_size  # always advance a full page (offset is an index, not cursor)
+
+            # PM.US occasionally returns a short page mid-stream due to
+            # deleted/gap market IDs.  Only stop on a fully-empty page.
+
+            await asyncio.sleep(page_delay)
+
+        logger.info(f"[PolymarketUS] list_markets: {len(all_markets)} total markets fetched")
+        return all_markets[:max_markets]
 
     async def get_market(self, market_id: str) -> Market:
         data = await self._public_request(f"/v1/market/slug/{market_id}")
