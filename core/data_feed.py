@@ -11,7 +11,7 @@ import logging
 from datetime import datetime
 from typing import Callable, Optional
 
-from polymarket_client.api import PolymarketClient
+from polymarket_client.api import BasePolymarketClient, PolymarketClient
 from polymarket_client.models import (
     Market,
     MarketState,
@@ -35,7 +35,7 @@ class DataFeed:
     
     def __init__(
         self,
-        client: PolymarketClient,
+        client: BasePolymarketClient,
         market_ids: list[str],
         position_refresh_interval: float = 5.0,
         on_update: Optional[Callable[[str, MarketState], None]] = None,

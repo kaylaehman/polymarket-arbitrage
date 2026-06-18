@@ -32,6 +32,13 @@ api:
   kalshi_api_key_id: ""
   kalshi_private_key: ""
 
+  # Polymarket.US creds (Ed25519). Prefer env POLYMARKET_US_KEY_ID / POLYMARKET_US_SECRET_KEY.
+  # Leave blank to keep this venue disabled.
+  polymarket_us_key_id: ""
+  polymarket_us_secret_key: ""
+  polymarket_us_rest_url: "https://api.polymarket.us"
+  polymarket_us_gateway_url: "https://gateway.polymarket.us"
+
   # Request settings
   timeout_seconds: 30
   max_retries: 3
@@ -120,6 +127,9 @@ mode:
   # Both simulate in dry_run; place real Kalshi orders only when trading_mode: live.
   kalshi_native_enabled: true
   kalshi_oracle_enabled: false
+
+  # Polymarket.US venue. Disabled by default -- set to true + provide creds to enable.
+  polymarket_us_enabled: false
   
   # Dry run settings
   dry_run_initial_balance: 10000

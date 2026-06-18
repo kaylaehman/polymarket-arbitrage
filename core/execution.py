@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Optional
 
-from polymarket_client.api import PolymarketClient
+from polymarket_client.api import BasePolymarketClient, PolymarketClient
 from polymarket_client.models import (
     Order,
     OrderBook,
@@ -70,7 +70,7 @@ class ExecutionEngine:
     
     def __init__(
         self,
-        client: PolymarketClient,
+        client: BasePolymarketClient,
         risk_manager: RiskManager,
         portfolio: Portfolio,
         config: ExecutionConfig,

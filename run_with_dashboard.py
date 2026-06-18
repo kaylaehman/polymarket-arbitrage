@@ -23,6 +23,7 @@ from datetime import datetime
 import uvicorn
 
 from polymarket_client import PolymarketClient
+from polymarket_client.api import BasePolymarketClient
 from kalshi_client import KalshiClient
 from core.data_feed import DataFeed
 from core.arb_engine import ArbEngine, ArbConfig
@@ -33,6 +34,10 @@ from core.cross_platform_arb import CrossPlatformArbEngine, MarketMatcher
 from core.cross_platform_execution import CrossPlatformExecutor, CrossExecConfig
 from polymarket_client.models import Market, MarketState
 from utils.config_loader import load_config, BotConfig
+try:
+    from polymarket_us_client import PolymarketUSClient
+except ImportError:
+    PolymarketUSClient = None  # type: ignore
 from utils.logging_utils import setup_logging
 from dashboard.server import app, dashboard_state
 from dashboard.integration import DashboardIntegration
@@ -97,21 +102,32 @@ class TradingBotWithDashboard:
         self._running = True
         
         # Initialize Polymarket API client
-        self.client = PolymarketClient(
-            rest_url=self.config.api.polymarket_rest_url,
-            ws_url=self.config.api.polymarket_ws_url,
-            gamma_url=self.config.api.gamma_api_url,
-            api_key=self.config.api.api_key,
-            api_secret=self.config.api.api_secret,
-            passphrase=self.config.api.passphrase,
-            private_key=self.config.api.private_key,
-            signature_type=self.config.api.signature_type,
-            funder=self.config.api.funder,
-            timeout=self.config.api.timeout_seconds,
-            # Read-only (simulated) Polymarket unless a real polymarket.com wallet
-            # key is set. Placeholder/empty key must NOT attempt live CLOB auth.
-            dry_run=self.config.is_dry_run or self.config.api.private_key in (None, "", "YOUR_PRIVATE_KEY_HERE"),
-        )
+        if getattr(self.config.mode, "polymarket_us_enabled", False) and PolymarketUSClient is not None:
+            logger.info("Initializing Polymarket.US client (polymarket_us_enabled=true)")
+            self.client = PolymarketUSClient(
+                key_id=self.config.api.polymarket_us_key_id,
+                secret_key=self.config.api.polymarket_us_secret_key,
+                dry_run=self.config.is_dry_run,
+                rest_url=self.config.api.polymarket_us_rest_url,
+                gateway_url=self.config.api.polymarket_us_gateway_url,
+                timeout=self.config.api.timeout_seconds,
+            )
+        else:
+            self.client = PolymarketClient(
+                rest_url=self.config.api.polymarket_rest_url,
+                ws_url=self.config.api.polymarket_ws_url,
+                gamma_url=self.config.api.gamma_api_url,
+                api_key=self.config.api.api_key,
+                api_secret=self.config.api.api_secret,
+                passphrase=self.config.api.passphrase,
+                private_key=self.config.api.private_key,
+                signature_type=self.config.api.signature_type,
+                funder=self.config.api.funder,
+                timeout=self.config.api.timeout_seconds,
+                # Read-only (simulated) Polymarket unless a real polymarket.com wallet
+                # key is set. Placeholder/empty key must NOT attempt live CLOB auth.
+                dry_run=self.config.is_dry_run or self.config.api.private_key in (None, "", "YOUR_PRIVATE_KEY_HERE"),
+            )
         await self.client.connect()
         
         # Initialize Kalshi client (if cross-platform enabled)

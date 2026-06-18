@@ -43,6 +43,12 @@ class ApiConfig:
     kalshi_api_key_id: str = ""      # the key UUID shown in Kalshi settings
     kalshi_private_key: str = ""     # RSA private key PEM (full text, or path via env)
 
+    # Polymarket.US (Ed25519 signed REST API)
+    polymarket_us_key_id: str = ""
+    polymarket_us_secret_key: str = ""
+    polymarket_us_rest_url: str = "https://api.polymarket.us"
+    polymarket_us_gateway_url: str = "https://gateway.polymarket.us"
+
     timeout_seconds: float = 30.0
     max_retries: int = 3
     retry_delay_seconds: float = 1.0
@@ -108,6 +114,8 @@ class ModeConfig:
     # and only place real orders in live mode.
     kalshi_native_enabled: bool = False
     kalshi_oracle_enabled: bool = False
+    # Polymarket.US venue gate (disabled by default)
+    polymarket_us_enabled: bool = False
     dry_run_initial_balance: float = 10000.0
     simulate_fills: bool = True
     fill_probability: float = 0.8
@@ -261,6 +269,8 @@ def load_config(config_path: str = "config.yaml") -> BotConfig:
         "funder": "POLYMARKET_FUNDER",
         "kalshi_api_key_id": "KALSHI_API_KEY_ID",
         "kalshi_private_key": "KALSHI_PRIVATE_KEY",
+        "polymarket_us_key_id": "POLYMARKET_US_KEY_ID",
+        "polymarket_us_secret_key": "POLYMARKET_US_SECRET_KEY",
     })
 
     # KALSHI_PRIVATE_KEY may point at a PEM file rather than hold the key inline.
