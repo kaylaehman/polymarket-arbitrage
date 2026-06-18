@@ -291,6 +291,7 @@ class PolymarketClient(BasePolymarketClient):
         
         Uses pagination to get ALL active markets across all categories!
         """
+        all_markets = []
         try:
             params = filters.copy() if filters else {}
             params.setdefault("closed", "false")
@@ -348,6 +349,15 @@ class PolymarketClient(BasePolymarketClient):
             return all_markets
             
         except Exception as e:
+            # Polymarket's Gamma API hard-rejects deep pagination (HTTP 422 past
+            # ~offset 2000). If we already collected markets, proceed with those
+            # instead of crashing the whole data feed; only raise on a total failure.
+            if all_markets:
+                logger.warning(
+                    f"Market pagination stopped early ({e}); proceeding with "
+                    f"{len(all_markets)} markets fetched so far"
+                )
+                return all_markets
             logger.error(f"Failed to fetch markets from API: {e}")
             raise
     
