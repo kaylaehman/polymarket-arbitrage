@@ -34,7 +34,7 @@ utils/structural_bias.py     # repo #1 findings as parameters
 ```
 
 **Reused unchanged:** `kalshi_client/api.py`, `intelligence/` (IntelligenceEngine/AIAnalyzer/NewsFetcher), `core/kelly.py`.
-**Lightly extended:** `core/risk_manager.py` (Order Protocol + directional caps), `config.yaml` (`directional:` block), `run_with_dashboard.py` (+~8 lines to launch the task when enabled), `dashboard/server.py` (read-only panel), `utils/signal_db.py` (directional tables).
+**Lightly extended:** `core/risk_manager.py` (Order Protocol + directional caps), `config.yaml` (`directional:` block), `run_with_dashboard.py` (+~8 lines to launch the task when enabled), `dashboard/server.py` (new Directional dashboard section — see Dashboard), `utils/signal_db.py` (directional tables).
 
 ## Components
 - **Scanner:** paginate `/events?with_nested_markets=true&status=open`, flatten to binary markets, reject parlay/collection tickers (both YES-ask and NO-ask ~= $1), volume floor, category-tag. Output candidate markets.
@@ -78,8 +78,19 @@ directional:
                      stop_loss_pct: 0.30, take_profit_pct: 0.50, max_hold_hours: 72 }
 ```
 
+## Dashboard
+Integrated into the existing FastAPI dashboard at :8899 as a new **Directional** section (same style/live-update as the arb panels), backed by a new read-only `GET /api/directional` endpoint.
+
+Panels:
+- **Strategy status cards** — per strategy (Safe Compounder, AI-directional): enabled, mode (PAPER/LIVE badge), open positions, exposure used / cap.
+- **Open positions table** — strategy | market | side | entry | current price | size | unrealized P&L | stop/TP (AI) | age | paper/live tag.
+- **Decision feed** — recent evaluations: market | strategy | BUY/SKIP | side | AI confidence + short reasoning | edge | timestamp (shows WHY it traded or passed).
+- **Directional P&L** — realized + unrealized, win rate, split by strategy and paper-vs-live.
+
+Data comes from the directional SQLite tables (positions/signals) + live prices via kalshi_client. Read-only (no control actions in v1; pause/kill is via the existing /api/agent kill switch which the directional loop honors).
+
 ## Testing (TDD)
-Unit (mocked kalshi_client + intelligence, no live API): parlay filter; SafeCompounder NO-prob + edge math; EdgeFilter tiers; structural-bias lookup; Kelly sizing; risk Protocol gating; tracker exit triggers; paper-fill sim. One integration test: full pipeline on fixture markets (paper) asserts intended orders. ~25-30 tests.
+Unit (mocked kalshi_client + intelligence, no live API): parlay filter; SafeCompounder NO-prob + edge math; EdgeFilter tiers; structural-bias lookup; Kelly sizing; risk Protocol gating; tracker exit triggers; paper-fill sim. One integration test: full pipeline on fixture markets (paper) asserts intended orders. Dashboard: a test that /api/directional returns the expected shape from seeded SQLite rows. ~28-32 tests.
 
 ## Out of scope (YAGNI)
 PM.US directional; OpenRouter; multi-agent ensemble; WebSocket; Streamlit dashboard.
