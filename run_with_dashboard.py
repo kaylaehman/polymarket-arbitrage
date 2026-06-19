@@ -84,11 +84,21 @@ class TradingBotWithDashboard:
 
         # External-agent control (optional, e.g. OpenClaw)
         self.agent_controller = None
-        
+
+        # Directional trading engine (optional, gated by config.directional.enabled)
+        self.directional_engine = None
+
         # Server
         self._server = None
         self._server_task = None
-    
+
+    async def _guarded(self, coro, name: str) -> None:
+        """Run a coroutine and catch + log any exception (loop crash isolation)."""
+        try:
+            await coro
+        except Exception as e:
+            logger.error(f"[{name}] loop crashed (isolated): {e}", exc_info=True)
+
     async def start(self) -> None:
         """Start the bot and dashboard."""
         logger.info("=" * 60)
@@ -215,6 +225,24 @@ class TradingBotWithDashboard:
         except Exception as e:
             logger.warning(f"[Intelligence] init failed, continuing without: {e}")
             self.intelligence_engine = None
+
+        # Directional trading engine (gated; never touches arb loop)
+        directional_cfg = getattr(self.config, "directional", None)
+        if directional_cfg is None:
+            logger.warning("config.directional absent — directional trading disabled")
+        elif directional_cfg.enabled:
+            from core.directional.engine import DirectionalEngine
+            self.directional_engine = DirectionalEngine(
+                directional_cfg,
+                self.kalshi_client,
+                self.intelligence_engine,
+                self.risk_manager,
+            )
+            asyncio.create_task(
+                self._guarded(self.directional_engine.run_forever(), "directional")
+            )
+            dashboard_state.directional_store = self.directional_engine.store
+            logger.info("[Directional] Engine launched (paper-gated)")
 
         # Initialize signal database (optional; append-only persistence)
         if self.config.database.enabled:
