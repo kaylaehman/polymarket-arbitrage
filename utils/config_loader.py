@@ -196,6 +196,52 @@ class AgentConfig:
     allow_control: bool = False     # allow pause/kill (read-only when false)
 
 
+# ── Directional Trading Config ────────────────────────────────────────────────
+
+@dataclass
+class DirectionalCaps:
+    """Position caps for the directional trading engine."""
+    total_exposure: float = 30.0   # max total $ across all open directional positions
+    max_position: float = 8.0      # max $ per individual position
+    max_open: int = 4              # max simultaneous open positions
+
+
+@dataclass
+class SafeCompounderCfg:
+    """Config for the pure-math Safe Compounder strategy."""
+    mode: str = "paper"            # "paper" | "live"
+    min_edge_cents: float = 3.0    # minimum edge in cents to emit a candidate
+    skip_categories: list = field(default_factory=list)
+
+
+@dataclass
+class AiDirectionalCfg:
+    """Config for the AI-directional strategy."""
+    mode: str = "paper"            # "paper" | "live"
+    min_confidence: float = 0.65
+    min_edge_pct: float = 0.05
+    kelly_fraction: float = 0.25
+    stop_loss_pct: float = 0.30    # fraction of entry price below which to close
+    take_profit_pct: float = 0.50  # fraction of entry price above which to close
+    max_hold_hours: float = 72.0
+
+
+@dataclass
+class DirectionalConfig:
+    """Directional trading mode config. Disabled by default (additive)."""
+    enabled: bool = False
+    db_path: str = "data/directional.db"
+    scan_interval_seconds: int = 60
+    # M2 FIX: default 25 (not 200) to cap Claude/news API load per cycle.
+    markets_per_cycle: int = 25
+    # M1 FIX: explicit field so engine.py reads it properly (not via getattr fallback).
+    min_volume: int = 100
+    category_exclude: list = field(default_factory=list)
+    caps: DirectionalCaps = field(default_factory=DirectionalCaps)
+    safe_compounder: SafeCompounderCfg = field(default_factory=SafeCompounderCfg)
+    ai_directional: AiDirectionalCfg = field(default_factory=AiDirectionalCfg)
+
+
 @dataclass
 class BotConfig:
     """Complete bot configuration."""
@@ -208,6 +254,7 @@ class BotConfig:
     intelligence: IntelligenceConfig = field(default_factory=IntelligenceConfig)
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
+    directional: DirectionalConfig = field(default_factory=DirectionalConfig)
     
     @property
     def is_dry_run(self) -> bool:
@@ -290,6 +337,7 @@ def load_config(config_path: str = "config.yaml") -> BotConfig:
         intelligence=_build_intelligence_config(intelligence_data),
         database=_build_dataclass(DatabaseConfig, database_data),
         agent=_build_dataclass(AgentConfig, raw_config.get("agent", {}) or {}),
+        directional=_build_directional(raw_config.get("directional", {}) or {}),
     )
     
     # Validate
@@ -329,6 +377,19 @@ def _build_intelligence_config(data: dict) -> IntelligenceConfig:
     return _build_dataclass(IntelligenceConfig, {**top, "news": news, "claude": claude})
 
 
+def _build_directional(data: dict) -> DirectionalConfig:
+    """Build the nested DirectionalConfig.
+
+    Missing keys and a missing block both fall back to defaults, so existing
+    configs without a ``directional:`` block still parse cleanly (enabled=False).
+    """
+    caps = _build_dataclass(DirectionalCaps, data.get("caps", {}) or {})
+    safe_compounder = _build_dataclass(SafeCompounderCfg, data.get("safe_compounder", {}) or {})
+    ai_directional = _build_dataclass(AiDirectionalCfg, data.get("ai_directional", {}) or {})
+    top = {k: v for k, v in data.items() if k not in ("caps", "safe_compounder", "ai_directional")}
+    return _build_dataclass(DirectionalConfig, {**top, "caps": caps, "safe_compounder": safe_compounder, "ai_directional": ai_directional})
+
+
 def _validate_config(config: BotConfig) -> None:
     """Validate configuration values."""
     errors = []
@@ -362,6 +423,25 @@ def _validate_config(config: BotConfig) -> None:
     # Mode validation
     if config.mode.trading_mode.lower() not in ("live", "dry_run"):
         errors.append("mode.trading_mode must be 'live' or 'dry_run'")
+
+    # M4: Directional mode fields must be "paper" or "live" — typos must not pass silently.
+    _valid_modes = {"paper", "live"}
+    d = config.directional
+    if d.ai_directional.mode not in _valid_modes:
+        errors.append(
+            f"directional.ai_directional.mode must be 'paper' or 'live', got '{d.ai_directional.mode}'"
+        )
+    if d.safe_compounder.mode not in _valid_modes:
+        errors.append(
+            f"directional.safe_compounder.mode must be 'paper' or 'live', got '{d.safe_compounder.mode}'"
+        )
+    # M4: caps must be positive.
+    if d.caps.max_position <= 0:
+        errors.append("directional.caps.max_position must be positive")
+    if d.caps.total_exposure <= 0:
+        errors.append("directional.caps.total_exposure must be positive")
+    if d.caps.max_open <= 0:
+        errors.append("directional.caps.max_open must be positive")
     
     # Live mode checks
     if config.is_live:

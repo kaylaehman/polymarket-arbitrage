@@ -301,3 +301,44 @@ class RiskManager:
             self.config.blacklist.remove(market_id)
             logger.info(f"Market {market_id} removed from blacklist")
 
+    # ── Directional-trading risk gate ────────────────────────────────────────
+    # ADDITIVE: separate from check_order (which guards the live Polymarket-arb path).
+    # Caps are explicit arguments — read from config.directional.caps by the caller.
+
+    def check_directional_order(
+        self,
+        order,
+        open_count: int,
+        directional_exposure: float,
+        max_position: float,
+        max_total: float,
+        max_open: int,
+    ) -> bool:
+        """Gate a directional order against the directional-only caps.
+
+        Checks in order:
+        1. Global kill switch.
+        2. Per-position notional cap.
+        3. Total directional exposure cap.
+        4. Max simultaneous open positions.
+        """
+        if self.state.kill_switch_triggered:
+            logger.warning("Directional order rejected: kill switch triggered")
+            return False
+        if order.notional > max_position:
+            logger.warning(
+                f"Directional order rejected: notional {order.notional} > max_position {max_position}"
+            )
+            return False
+        if directional_exposure + order.notional > max_total:
+            logger.warning(
+                f"Directional order rejected: exposure {directional_exposure} + "
+                f"{order.notional} > max_total {max_total}"
+            )
+            return False
+        if open_count >= max_open:
+            logger.warning(
+                f"Directional order rejected: open_count {open_count} >= max_open {max_open}"
+            )
+            return False
+        return True

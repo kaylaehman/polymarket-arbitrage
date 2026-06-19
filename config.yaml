@@ -211,3 +211,34 @@ database:
   log_opportunities: true
   auto_log_outcomes: true    # Poll Gamma API for resolutions (poller is TBD)
 
+
+# ── Directional Trading ───────────────────────────────────────────────────────
+# Kalshi-only directional position-taking engine. Disabled by default.
+# Paper-first: each strategy has its own mode: paper|live.
+# Live execution requires EXPLICIT per-strategy mode + directional.enabled: true.
+directional:
+  enabled: false                  # KILL SWITCH: never enable without paper validation
+  db_path: data/directional.db
+  scan_interval_seconds: 60
+  markets_per_cycle: 25           # M2: 25 (not 200) to cap Claude/news API load per cycle
+  min_volume: 100                 # M1: minimum 24h volume for a market to be scanned
+  category_exclude: []            # e.g. [Weather, Esports]
+
+  caps:
+    total_exposure: 30            # max total USD across all open directional positions
+    max_position: 8               # max USD per individual position
+    max_open: 4                   # max simultaneous open positions
+
+  safe_compounder:
+    mode: paper                   # paper | live (live requires enabled: true above)
+    min_edge_cents: 3.0
+    skip_categories: []
+
+  ai_directional:
+    mode: paper                   # paper | live
+    min_confidence: 0.65
+    min_edge_pct: 0.05
+    kelly_fraction: 0.25
+    stop_loss_pct: 0.30
+    take_profit_pct: 0.50
+    max_hold_hours: 72.0
