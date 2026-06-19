@@ -54,6 +54,9 @@ class DashboardState:
             "matching_status": "idle",  # idle, matching, complete
         }
         
+        # Directional trading store (set by run_with_dashboard when engine is active)
+        self.directional_store: Optional["DirectionalStore"] = None
+
         # WebSocket connections
         self._connections: list[WebSocket] = []
     
@@ -153,6 +156,48 @@ class DashboardState:
 dashboard_state = DashboardState()
 
 
+def build_directional_payload(store) -> dict:
+    """Build the /api/directional response payload.
+
+    Args:
+        store: A DirectionalStore instance, or None when the engine is not active.
+
+    Returns:
+        Dict with keys ``strategies``, ``positions``, ``signals``, ``pnl``.
+        Returns the empty payload when ``store`` is None.
+    """
+    if store is None:
+        return {"strategies": [], "positions": [], "signals": [], "pnl": {}}
+
+    positions = [
+        {
+            "market_id": p.market_id,
+            "side": p.side,
+            "entry_price": p.entry_price,
+            "size": p.size,
+            "strategy": p.strategy,
+            "mode": p.mode,
+            "opened_at": p.opened_at.isoformat() if hasattr(p.opened_at, "isoformat") else str(p.opened_at),
+            "stop_loss": p.stop_loss,
+            "take_profit": p.take_profit,
+            "notional": p.notional,
+            "status": p.status,
+        }
+        for p in store.open_positions()
+    ]
+    signals = store.recent_signals(limit=50)
+    pnl = store.pnl_summary()
+    # Derive strategy names from signals (unique set, ordered)
+    strategy_names = sorted({s["strategy"] for s in signals}) if signals else []
+
+    return {
+        "strategies": strategy_names,
+        "positions": positions,
+        "signals": signals,
+        "pnl": pnl,
+    }
+
+
 def create_app() -> FastAPI:
     """Create the FastAPI application."""
     app = FastAPI(
@@ -214,7 +259,12 @@ def create_app() -> FastAPI:
     async def get_timing():
         """Get opportunity timing statistics."""
         return dashboard_state.timing
-    
+
+    @app.get("/api/directional")
+    async def get_directional():
+        """Get directional trading status: strategies, open positions, recent signals, P&L."""
+        return build_directional_payload(dashboard_state.directional_store)
+
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket):
         """WebSocket endpoint for real-time updates."""
@@ -1547,6 +1597,27 @@ def get_embedded_html() -> str:
             </div>
         </section>
 
+        <!-- Directional Trading Panel -->
+        <section class="card activity-card" id="directionalCard">
+            <div class="card-header">
+                <span class="card-title">Directional Trading</span>
+                <span id="directionalPositionCount" style="font-size: 0.75rem; color: var(--accent-green);">0 open</span>
+            </div>
+            <div class="card-body">
+                <div style="display:flex;gap:1rem;margin-bottom:0.75rem;font-size:0.8rem;color:var(--text-secondary);">
+                    <span>PnL: <strong id="directionalPnl">$0.00</strong></span>
+                    <span>Exposure: <strong id="directionalExposure">$0.00</strong></span>
+                    <span>Closed: <strong id="directionalClosed">0</strong></span>
+                </div>
+                <div class="activity-list" id="directionalPositionList">
+                    <div class="empty-state">
+                        <div class="empty-icon">--</div>
+                        <div>Directional engine inactive or no open positions</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
         <!-- 🔥 LIVE OPPORTUNITIES FEED -->
         <section class="card opportunities-feed">
             <div class="card-header">
@@ -2501,7 +2572,59 @@ def get_embedded_html() -> str:
         // Initial load
         connect();
         fetchState();
-        
+
+        // Directional panel: poll /api/directional every 10 seconds
+        async function fetchDirectional() {
+            try {
+                const resp = await fetch('/api/directional');
+                const data = await resp.json();
+                updateDirectionalPanel(data);
+            } catch (e) {
+                // silently ignore — panel just stays stale
+            }
+        }
+
+        function updateDirectionalPanel(data) {
+            if (!data) return;
+            const positions = data.positions || [];
+            const pnl = data.pnl || {};
+            const el = document.getElementById('directionalPositionCount');
+            if (el) el.textContent = positions.length + ' open';
+            const pnlEl = document.getElementById('directionalPnl');
+            if (pnlEl) {
+                const v = pnl.total_realized_pnl || 0;
+                pnlEl.textContent = (v >= 0 ? '+' : '') + '$' + v.toFixed(2);
+                pnlEl.style.color = v >= 0 ? 'var(--accent-green)' : 'var(--accent-red)';
+            }
+            const expEl = document.getElementById('directionalExposure');
+            if (expEl) expEl.textContent = '$' + ((pnl.open_exposure || 0).toFixed(2));
+            const closedEl = document.getElementById('directionalClosed');
+            if (closedEl) closedEl.textContent = String(pnl.closed_count || 0);
+
+            const list = document.getElementById('directionalPositionList');
+            if (!list) return;
+            if (positions.length === 0) {
+                list.innerHTML = '<div class="empty-state"><div class="empty-icon">--</div><div>No open directional positions</div></div>';
+                return;
+            }
+            const esc = v => String(v == null ? '' : v).replace(/[&<>"']/g,
+                c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+            list.innerHTML = positions.map(p => `
+                <div class="activity-item">
+                    <div class="activity-icon signal" style="color:var(--accent-green)">${esc(p.side.charAt(0))}</div>
+                    <div class="activity-content">
+                        <div class="activity-message">
+                            <strong>${esc(p.side)}</strong> ${esc(p.strategy)} · ${esc(p.mode)} · $${(p.notional||0).toFixed(2)}
+                        </div>
+                        <div class="activity-time">${esc(p.market_id)} · entry ${(p.entry_price||0).toFixed(3)} · ${esc(p.opened_at||'')}</div>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        fetchDirectional();
+        setInterval(fetchDirectional, 10000);
+
         // Periodic refresh as backup
         setInterval(fetchState, 5000);
     </script>
