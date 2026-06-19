@@ -10,12 +10,17 @@ Live mode:
   2. Converts side string to enums (directional only buys).
   3. Calls kalshi_client.place_order(...).
   4. Records a DirectionalPosition with mode="live".
+
+Closing (C2 fix):
+  close_position(position, price, mode) — SELLs the SAME token at own-space price.
+  Paper: no API call (position marked closed by tracker).
+  Live: calls place_order with SELL side and the position's own token type.
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from polymarket_client.models import OrderSide, TokenType
@@ -82,6 +87,36 @@ class Executor:
 
         return self._record(order, mode, stop_loss, take_profit)
 
+    async def close_position(
+        self,
+        position: DirectionalPosition,
+        price: float,
+        mode: str,
+    ) -> None:
+        """C2 FIX: Close a position by SELLing the SAME token at own-space price.
+
+        Args:
+            position: The open position to close.
+            price: Current mid-price in the position's own token-price space.
+            mode: "paper" (no API call) or "live" (SELL via kalshi_client).
+        """
+        if mode != "live":
+            # Paper close: tracker marks closed; no API call needed.
+            return
+
+        token_type = TokenType.YES if position.side == "YES" else TokenType.NO
+        try:
+            await self._client.place_order(
+                ticker=position.market_id,
+                token_type=token_type,
+                side=OrderSide.SELL,  # SELL the held token to exit
+                price=price,
+                size=position.size,
+                strategy_tag=position.strategy,
+            )
+        except Exception as exc:
+            logger.error("close_position failed for %s: %s", position.market_id, exc)
+
     # ──────────────────────────────────────────────────────────────────────────
 
     def _record(
@@ -98,7 +133,7 @@ class Executor:
             size=order.size,
             strategy=order.strategy,
             mode=mode,
-            opened_at=datetime.utcnow(),
+            opened_at=datetime.now(timezone.utc),
             stop_loss=stop_loss,
             take_profit=take_profit,
             notional=order.notional,
