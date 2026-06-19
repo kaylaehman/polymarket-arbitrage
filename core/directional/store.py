@@ -11,7 +11,7 @@ arb signal tables and uses its own db file (config.directional.db_path).
 import logging
 import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from core.directional.models import DirectionalCandidate, DirectionalPosition
@@ -190,7 +190,7 @@ def _row_to_position(row: sqlite3.Row) -> DirectionalPosition:
         try:
             opened_at = datetime.fromisoformat(opened_at)
         except ValueError:
-            opened_at = datetime.utcnow()
+            opened_at = datetime.now(timezone.utc)
     return DirectionalPosition(
         market_id=row["market_id"],
         side=row["side"],
