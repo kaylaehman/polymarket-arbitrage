@@ -75,7 +75,11 @@ class AiDirectional(Strategy):
                     continue
 
                 side = "YES" if signal.direction == "bullish" else "NO"
-                edge = raw_edge + structural_score(m.yes_price, side, m.category)
+                # I3 FIX: candidate.edge = raw AI edge only (vetted by the gates above).
+                # structural_score is retained as a tiebreaker for future logging but
+                # must NOT be folded into the sizing edge — doing so inflates Kelly
+                # beyond what the confidence/edge gates vetted.
+                _ = structural_score(m.yes_price, side, m.category)  # tiebreaker (unused)
 
                 candidates.append(
                     DirectionalCandidate(
@@ -86,7 +90,7 @@ class AiDirectional(Strategy):
                         market_price=m.yes_price,
                         ai_probability=signal.ai_probability,
                         confidence=conf,
-                        edge=edge,
+                        edge=raw_edge,
                         strategy=self.name,
                         reasoning=getattr(signal, "reasoning", ""),
                     )

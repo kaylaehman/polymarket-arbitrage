@@ -66,3 +66,21 @@ async def test_skips_none_signal():
     s = AiDirectional(NoneIntel(), 0.60, 0.05)
     result = await s.scan([m], ctx={})
     assert result == []
+
+
+# ── I3: candidate.edge equals raw AI edge (not inflated by structural_score) ──
+
+@pytest.mark.asyncio
+async def test_candidate_edge_equals_raw_ai_edge():
+    """I3: candidate.edge must equal abs(signal.edge_vs_market), not + structural_score."""
+    raw_edge = 0.12
+    m = mk("KXCPI-2", 0.58, "Finance")
+    s = AiDirectional(FakeIntel(), min_confidence=0.60, min_edge_pct=0.05)
+    cands = await s.scan([m], ctx={})
+    assert len(cands) == 1
+    # The edge stored on the candidate must equal the raw AI edge exactly,
+    # not raw_edge + structural_score(...).
+    assert abs(cands[0].edge - raw_edge) < 1e-9, (
+        f"candidate.edge={cands[0].edge} should equal raw_edge={raw_edge}; "
+        "structural_score must not be added to sizing edge"
+    )
