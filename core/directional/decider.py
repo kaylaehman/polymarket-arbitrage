@@ -6,7 +6,7 @@ Sizing rules (plan Task 11 REVISED):
   NO  side: kelly_fraction(edge, yes_price=1-market_price, ai_probability=1-ai_probability,
                            confidence, fraction)
   Notional = fraction * cash_balance, capped at min(max_position_usd, caps.max_position).
-  Edge-based fallback (edge * kelly_frac * cash) when kelly returns 0 and edge > 0.
+  I2 FIX: when Kelly returns 0 (non-positive EV), return None — NO edge-based fallback.
 - Safe Compounder (ai_probability is None): fixed min(max_position_usd, caps.max_position).
 - size = floor(notional / price), notional = size * price. Return None if size < 1.
 - Risk gate via check_directional_order.
@@ -115,9 +115,6 @@ class Decider:
             )
 
         notional = frac * cash
-        # Edge-based fallback: when Kelly returns 0 for a candidate that passed
-        # edge gates, size using edge strength directly (edge * kelly_frac * cash).
-        if notional <= 0 and candidate.edge > 0:
-            notional = candidate.edge * self._kelly_frac * cash
-
+        # I2 FIX: do NOT fall back to edge-based sizing when Kelly is 0.
+        # Kelly returning 0 means non-positive EV; sizing such bets corrupts P&L.
         return min(notional, pos_cap)
