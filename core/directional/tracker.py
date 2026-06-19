@@ -23,29 +23,33 @@ Tracker class
 ``Tracker(store, kalshi_client, executor, risk_manager)``
 
   ``async sweep(now: datetime)``:
-    1. For AI-directional positions: fetch current price; call should_exit.
+    1. For AI-directional positions ONLY: fetch current price; call should_exit.
        On exit: paper → mark closed; live (kill switch NOT triggered) →
-       place opposing order (executor) then mark closed.
+       call executor.close_position(position, price, mode="live") then mark closed.
     2. For ALL positions: if market resolved → settle at 1.0 (YES) / 0.0
        (NO), mark closed, record realized P&L.  Resolution settlement
        proceeds even when kill switch is triggered.
 
 Kill-switch gate: when mode=="live" and risk_manager.state.kill_switch_triggered,
 skip placing live closing orders; resolution settlement still allowed.
+
+Safe Compounder positions are NOT in _AI_STRATEGIES — they are held to resolution
+only (no stop-loss/take-profit/max-hold sweeping).
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from core.directional.models import DirectionalPosition
 
 logger = logging.getLogger(__name__)
 
-# Strategies that use should_exit (vs. pure resolution-based strategies).
-_AI_STRATEGIES = {"ai_directional", "safe_compounder"}
+# C1 FIX: safe_compounder removed — SC positions are held to resolution only,
+# not subject to stop-loss/take-profit/max-hold sweep.
+_AI_STRATEGIES = {"ai_directional"}
 
 # Default max_hold hours used by sweep() when not overridden.
 _DEFAULT_MAX_HOLD_HOURS = 72.0
@@ -75,7 +79,15 @@ def should_exit(
     if position.take_profit is not None and price >= position.take_profit:
         return (True, "take_profit")
 
-    age_hours = (now - position.opened_at).total_seconds() / 3600.0
+    # Normalize both to naive UTC for duration arithmetic to handle mixed
+    # aware/naive datetimes gracefully (e.g. legacy test helpers still use utcnow()).
+    now_naive = now.replace(tzinfo=None) if now.tzinfo is not None else now
+    opened_naive = (
+        position.opened_at.replace(tzinfo=None)
+        if position.opened_at.tzinfo is not None
+        else position.opened_at
+    )
+    age_hours = (now_naive - opened_naive).total_seconds() / 3600.0
     if age_hours > max_hold_hours:
         return (True, "max_hold")
 
@@ -98,7 +110,7 @@ class Tracker:
     ) -> None:
         """Check all open positions and close those that meet exit criteria."""
         if now is None:
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
 
         positions = self._store.open_positions()
 
@@ -135,12 +147,14 @@ class Tracker:
         else:
             return False
 
+        # M5: paper P&L is GROSS of Kalshi fees; go-live expectancy gate must
+        # account for the ~1% fee per side before comparing paper vs. live hurdle.
         realized_pnl = (resolution_price - pos.entry_price) * pos.size
         self._store.update_position(
             pos.market_id,
             status="closed",
             realized_pnl=realized_pnl,
-            closed_at=datetime.utcnow().isoformat(),
+            closed_at=datetime.now(timezone.utc).isoformat(),
         )
         logger.info(
             "Resolved %s %s side=%s pnl=%.4f",
@@ -174,26 +188,16 @@ class Tracker:
         )
 
         if not kill_switch_active and pos.mode == "live":
-            # Live close: executor places opposing order.
-            from core.directional.models import DirectionalOrder
-
-            close_order = DirectionalOrder(
-                market_id=pos.market_id,
-                side="NO" if pos.side == "YES" else "YES",
-                price=current_price,
-                size=pos.size,
-                notional=current_price * pos.size,
-                strategy=pos.strategy,
-                reasoning=f"exit:{reason}",
-            )
-            await self._executor.place(close_order, mode="live")
+            # C2 FIX: close position by SELLing the SAME token at its own-space price.
+            # Delegate to executor.close_position so the SELL side/token is encapsulated.
+            await self._executor.close_position(pos, current_price, mode="live")
 
         realized_pnl = (current_price - pos.entry_price) * pos.size
         self._store.update_position(
             pos.market_id,
             status="closed",
             realized_pnl=realized_pnl,
-            closed_at=datetime.utcnow().isoformat(),
+            closed_at=datetime.now(timezone.utc).isoformat(),
         )
 
     async def _get_current_price(self, pos: DirectionalPosition) -> Optional[float]:
