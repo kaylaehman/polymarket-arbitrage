@@ -232,7 +232,10 @@ class DirectionalConfig:
     enabled: bool = False
     db_path: str = "data/directional.db"
     scan_interval_seconds: int = 60
-    markets_per_cycle: int = 200
+    # M2 FIX: default 25 (not 200) to cap Claude/news API load per cycle.
+    markets_per_cycle: int = 25
+    # M1 FIX: explicit field so engine.py reads it properly (not via getattr fallback).
+    min_volume: int = 100
     category_exclude: list = field(default_factory=list)
     caps: DirectionalCaps = field(default_factory=DirectionalCaps)
     safe_compounder: SafeCompounderCfg = field(default_factory=SafeCompounderCfg)
@@ -420,6 +423,25 @@ def _validate_config(config: BotConfig) -> None:
     # Mode validation
     if config.mode.trading_mode.lower() not in ("live", "dry_run"):
         errors.append("mode.trading_mode must be 'live' or 'dry_run'")
+
+    # M4: Directional mode fields must be "paper" or "live" — typos must not pass silently.
+    _valid_modes = {"paper", "live"}
+    d = config.directional
+    if d.ai_directional.mode not in _valid_modes:
+        errors.append(
+            f"directional.ai_directional.mode must be 'paper' or 'live', got '{d.ai_directional.mode}'"
+        )
+    if d.safe_compounder.mode not in _valid_modes:
+        errors.append(
+            f"directional.safe_compounder.mode must be 'paper' or 'live', got '{d.safe_compounder.mode}'"
+        )
+    # M4: caps must be positive.
+    if d.caps.max_position <= 0:
+        errors.append("directional.caps.max_position must be positive")
+    if d.caps.total_exposure <= 0:
+        errors.append("directional.caps.total_exposure must be positive")
+    if d.caps.max_open <= 0:
+        errors.append("directional.caps.max_open must be positive")
     
     # Live mode checks
     if config.is_live:

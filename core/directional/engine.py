@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from core.directional.decider import Decider
@@ -54,12 +54,11 @@ class DirectionalEngine:
         self.store = DirectionalStore(config.db_path)
         self.store.init_schema()
 
-        # Build scanner
-        min_volume = getattr(config, "min_volume", 100)
+        # Build scanner (M1: min_volume is a proper field on DirectionalConfig)
         self.scanner = KalshiMarketScanner(
             kalshi_client=kalshi_client,
             categorize_fn=categorize,
-            min_volume=min_volume,
+            min_volume=config.min_volume,
             exclude_categories=list(config.category_exclude),
         )
 
@@ -181,7 +180,7 @@ class DirectionalEngine:
                 mode = strat_cfg.mode
                 await self.executor.place(order, mode=mode, stop_loss=stop_loss, take_profit=take_profit)
 
-        await self.tracker.sweep(now=datetime.utcnow(), max_hold_hours=self._max_hold_hours)
+        await self.tracker.sweep(now=datetime.now(timezone.utc), max_hold_hours=self._max_hold_hours)
 
     async def run_forever(self) -> None:
         """Loop run_once every scan_interval_seconds; catches all exceptions."""

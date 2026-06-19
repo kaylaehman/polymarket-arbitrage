@@ -220,7 +220,8 @@ directional:
   enabled: false                  # KILL SWITCH: never enable without paper validation
   db_path: data/directional.db
   scan_interval_seconds: 60
-  markets_per_cycle: 200
+  markets_per_cycle: 25           # M2: 25 (not 200) to cap Claude/news API load per cycle
+  min_volume: 100                 # M1: minimum 24h volume for a market to be scanned
   category_exclude: []            # e.g. [Weather, Esports]
 
   caps:

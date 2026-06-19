@@ -1,6 +1,7 @@
 # tests/directional/test_config.py
 import pytest
-from utils.config_loader import load_config
+import yaml
+from utils.config_loader import load_config, DirectionalConfig, ConfigError
 
 
 def test_directional_defaults_when_absent(tmp_path):
@@ -15,3 +16,96 @@ def test_directional_disabled_when_present(tmp_path):
     """Load the real config.yaml (with the appended directional block) and verify enabled=False."""
     cfg = load_config("config.yaml")
     assert cfg.directional.enabled is False
+
+
+# ── M1: min_volume field present on DirectionalConfig ─────────────────────────
+
+def test_directional_config_has_min_volume():
+    """M1: DirectionalConfig must expose min_volume (default 100)."""
+    cfg = DirectionalConfig()
+    assert hasattr(cfg, "min_volume"), "DirectionalConfig must have min_volume field"
+    assert cfg.min_volume == 100
+
+
+def test_min_volume_loaded_from_yaml(tmp_path):
+    """M1: min_volume in config.yaml directional block is read by load_config."""
+    config_file = tmp_path / "config.yaml"
+    data = {
+        "directional": {
+            "enabled": False,
+            "min_volume": 500,
+        }
+    }
+    config_file.write_text(yaml.dump(data))
+    cfg = load_config(str(config_file))
+    assert cfg.directional.min_volume == 500
+
+
+# ── M2: markets_per_cycle default is 25 ───────────────────────────────────────
+
+def test_directional_markets_per_cycle_default_is_25():
+    """M2: markets_per_cycle default must be 25 (not 200) to cap Claude/news load."""
+    cfg = DirectionalConfig()
+    assert cfg.markets_per_cycle == 25, (
+        f"markets_per_cycle default should be 25, got {cfg.markets_per_cycle}"
+    )
+
+
+# ── M4: mode fields validated — typos must not be treated as non-paper ─────────
+
+def test_invalid_directional_mode_raises_config_error(tmp_path):
+    """M4: A typo'd mode like 'lve' must raise ConfigError, not silently proceed."""
+    config_file = tmp_path / "config.yaml"
+    data = {
+        "directional": {
+            "enabled": False,
+            "ai_directional": {"mode": "lve"},  # typo
+        }
+    }
+    config_file.write_text(yaml.dump(data))
+    with pytest.raises(ConfigError, match="mode"):
+        load_config(str(config_file))
+
+
+def test_invalid_safe_compounder_mode_raises_config_error(tmp_path):
+    """M4: A typo'd safe_compounder mode must also raise ConfigError."""
+    config_file = tmp_path / "config.yaml"
+    data = {
+        "directional": {
+            "enabled": False,
+            "safe_compounder": {"mode": "Papr"},  # typo
+        }
+    }
+    config_file.write_text(yaml.dump(data))
+    with pytest.raises(ConfigError, match="mode"):
+        load_config(str(config_file))
+
+
+def test_negative_cap_raises_config_error(tmp_path):
+    """M4: Negative caps must raise ConfigError."""
+    config_file = tmp_path / "config.yaml"
+    data = {
+        "directional": {
+            "enabled": False,
+            "caps": {"max_position": -5},
+        }
+    }
+    config_file.write_text(yaml.dump(data))
+    with pytest.raises(ConfigError, match="positive"):
+        load_config(str(config_file))
+
+
+def test_valid_modes_do_not_raise(tmp_path):
+    """M4: 'paper' and 'live' are both valid mode values."""
+    config_file = tmp_path / "config.yaml"
+    data = {
+        "directional": {
+            "enabled": False,
+            "ai_directional": {"mode": "live"},
+            "safe_compounder": {"mode": "paper"},
+        }
+    }
+    config_file.write_text(yaml.dump(data))
+    cfg = load_config(str(config_file))  # must not raise
+    assert cfg.directional.ai_directional.mode == "live"
+    assert cfg.directional.safe_compounder.mode == "paper"
