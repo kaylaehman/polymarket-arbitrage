@@ -713,6 +713,40 @@ class TradingBotWithDashboard:
                 logger.info(f"Cross-platform sweep: {found} opportunities across {len(pairs)} pairs")
             await asyncio.sleep(poll)
 
+    async def _select_kalshi_arb_markets(self):
+        """Select Kalshi markets for bundle-arb watching.
+
+        Tries to use KalshiMarketScanner (events endpoint, real orderbooks) so
+        the arb engine watches LIQUID markets with actual two-sided books.
+        max_spread=0.99 disables the spread filter so bundle dislocations (any
+        spread) can be detected.
+
+        Falls back to the old volume-sort on self._kalshi_markets if the scan
+        fails for any reason.  self._kalshi_markets is NEVER modified here so
+        the cross-platform matcher continues to work.
+        """
+        try:
+            from core.directional.scanner import KalshiMarketScanner
+            from utils.kalshi_categories import categorize
+            scanner = KalshiMarketScanner(
+                self.kalshi_client,
+                categorize,
+                min_volume=0,
+                exclude_categories=[],
+                max_spread=0.99,
+            )
+            liquid = await scanner.scan(self.config.monitoring.kalshi_max_markets)
+            if liquid:
+                return liquid
+        except Exception as e:
+            logger.warning(f"[KalshiArb] liquid-market scan failed, falling back: {e}")
+        # Fallback: previous behaviour (volume sort over the macro/parlay set)
+        return sorted(
+            self._kalshi_markets,
+            key=lambda m: getattr(m, "volume", 0) or 0,
+            reverse=True,
+        )[: self.config.monitoring.kalshi_max_markets]
+
     async def _run_kalshi_trading(self) -> None:
         """
         Kalshi-native single-venue bundle arbitrage (for Kalshi-only users).
@@ -748,9 +782,10 @@ class TradingBotWithDashboard:
         await self.kalshi_execution_engine.start()
 
         # Watch the most liquid Kalshi markets.
-        watched = sorted(self._kalshi_markets, key=lambda m: m.volume, reverse=True)[
-            : self.config.monitoring.kalshi_max_markets
-        ]
+        # _select_kalshi_arb_markets tries the events-endpoint scanner first so
+        # we get markets with real orderbooks; falls back to the old sort if the
+        # scan fails.  self._kalshi_markets is untouched (cross-platform still works).
+        watched = await self._select_kalshi_arb_markets()
         poll = self.config.monitoring.kalshi_poll_seconds
         mode = "LIVE" if self.config.is_live else "dry_run"
         logger.info(f"Kalshi-native bundle-arb trading started: {len(watched)} markets, every {poll}s ({mode})")

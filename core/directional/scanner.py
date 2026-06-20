@@ -36,7 +36,8 @@ from kalshi_client.models import KalshiMarket
 
 logger = logging.getLogger(__name__)
 
-# Maximum YES spread (ask - bid) to consider a market liquid.
+# Default maximum YES spread (ask - bid) to consider a market liquid.
+# Can be overridden per-instance via the max_spread constructor parameter.
 MAX_SPREAD = 0.20
 
 # Parlay ticker prefixes/substrings to exclude.
@@ -113,6 +114,7 @@ class KalshiMarketScanner:
         exclude_categories: List[str],
         cache_ttl_seconds: int = 600,
         _now_fn: Optional[Callable[[], float]] = None,
+        max_spread: float = MAX_SPREAD,
     ) -> None:
         self._client = kalshi_client
         self._categorize = categorize_fn
@@ -120,6 +122,7 @@ class KalshiMarketScanner:
         self._exclude = set(exclude_categories)
         self._cache_ttl = cache_ttl_seconds
         self._now = _now_fn if _now_fn is not None else time.monotonic
+        self._max_spread = max_spread
 
         # Universe cache (flat KalshiMarket list from /events)
         self._cached_universe: List[KalshiMarket] = []
@@ -233,7 +236,7 @@ class KalshiMarketScanner:
             if bid is None or ask is None:
                 continue
             spread = ask - bid
-            if spread > MAX_SPREAD:
+            if spread > self._max_spread:
                 continue
 
             # Attach real mid-price and store book

@@ -567,3 +567,38 @@ async def test_scan_empty_universe_returns_empty():
     sc = KalshiMarketScanner(client, lambda t: "Politics", min_volume=0, exclude_categories=[])
     result = await sc.scan(max_markets=10)
     assert result == []
+
+
+# ---------------------------------------------------------------------------
+# Scanner — max_spread constructor parameter
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_scan_max_spread_excludes_wide_book_at_default():
+    """A market with YES spread ~0.5 is excluded when max_spread=0.20 (default)."""
+    # bid=0.25, ask=0.75 → spread=0.50 > 0.20
+    client = MockClient(
+        events_pages=[_events_response("KXPOL-WIDE")],
+        ob_map={"KXPOL-WIDE": _ob(0.25, 0.75)},
+    )
+    sc = KalshiMarketScanner(
+        client, lambda t: "Politics", min_volume=0, exclude_categories=[], max_spread=0.20
+    )
+    result = await sc.scan(max_markets=10)
+    assert result == [], "Wide-spread market should be excluded at default max_spread=0.20"
+
+
+@pytest.mark.asyncio
+async def test_scan_max_spread_includes_wide_book_when_relaxed():
+    """A market with YES spread ~0.5 is included when max_spread=0.99 (arb mode)."""
+    # bid=0.25, ask=0.75 → spread=0.50 <= 0.99
+    client = MockClient(
+        events_pages=[_events_response("KXPOL-WIDE")],
+        ob_map={"KXPOL-WIDE": _ob(0.25, 0.75)},
+    )
+    sc = KalshiMarketScanner(
+        client, lambda t: "Politics", min_volume=0, exclude_categories=[], max_spread=0.99
+    )
+    result = await sc.scan(max_markets=10)
+    assert len(result) == 1, "Wide-spread market should be included at max_spread=0.99"
+    assert result[0].ticker == "KXPOL-WIDE"
