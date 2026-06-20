@@ -790,6 +790,35 @@ class TradingBotWithDashboard:
         mode = "LIVE" if self.config.is_live else "dry_run"
         logger.info(f"Kalshi-native bundle-arb trading started: {len(watched)} markets, every {poll}s ({mode})")
 
+        # ── WS real-time feed (additive, gated, REST sweep always retained) ──
+        ws_client = None
+        if getattr(self.config.monitoring, "kalshi_ws_enabled", False):
+            try:
+                import time as _time
+                from kalshi_client.ws import KalshiWSClient
+                from core.kalshi_ws_detector import WSBundleDetector, decide_detection_mode
+                titles = {m.ticker: m.title for m in watched}
+                detector = WSBundleDetector(
+                    self.kalshi_arb_engine,
+                    self.kalshi_execution_engine,
+                    titles,
+                )
+                ws_client = KalshiWSClient(
+                    self.kalshi_client,
+                    on_book_update=detector.on_book_update,
+                )
+                asyncio.create_task(
+                    self._guarded(ws_client.run([m.ticker for m in watched]), "kalshi-ws")
+                )
+                logger.info(f"[KalshiWS] real-time feed enabled for {len(watched)} tickers")
+            except Exception as _ws_err:
+                logger.warning(f"[KalshiWS] setup failed — REST-only fallback: {_ws_err}")
+                ws_client = None
+        else:
+            import time as _time
+
+        prev_mode = "rest"
+
         while self._running:
             found = 0
             for km in watched:
@@ -822,7 +851,27 @@ class TradingBotWithDashboard:
 
             if found:
                 logger.info(f"Kalshi-native sweep: {found} bundle-arb signals across {len(watched)} markets")
-            await asyncio.sleep(poll)
+
+            # ── sleep cadence: shorter when WS is healthy ──
+            if ws_client is not None:
+                cur_mode, reason = decide_detection_mode(
+                    True,
+                    ws_client.state,
+                    ws_client.last_message_ts,
+                    _time.monotonic(),
+                    self.config.monitoring.ws_staleness_seconds,
+                )
+            else:
+                cur_mode, reason = "rest", "rest:disabled"
+            if cur_mode != prev_mode:
+                logger.info(f"[KalshiWS] -> {cur_mode} ({reason})")
+                prev_mode = cur_mode
+            sweep_interval = (
+                self.config.monitoring.ws_reconcile_seconds
+                if cur_mode == "ws"
+                else poll
+            )
+            await asyncio.sleep(sweep_interval)
 
     async def stop(self) -> None:
         """Stop everything gracefully."""

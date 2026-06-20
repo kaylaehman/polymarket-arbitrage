@@ -147,6 +147,10 @@ class MonitoringConfig:
     # Kalshi-native bundle-arb loop
     kalshi_poll_seconds: float = 10.0           # seconds between sweeps of watched Kalshi markets
     kalshi_max_markets: int = 100               # cap on Kalshi markets watched (by volume)
+    # Kalshi WebSocket real-time feed (Task WS-1)
+    kalshi_ws_enabled: bool = True              # use WS feed when available; REST sweep stays as fallback
+    ws_staleness_seconds: float = 10.0          # treat WS book as stale if no update for this many seconds
+    ws_reconcile_seconds: float = 120.0         # full REST reconcile interval while WS is running
 
 
 @dataclass

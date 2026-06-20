@@ -90,6 +90,9 @@ class ArbConfig:
     taker_fee_bps: float = 150      # Taking liquidity (1.5%)
     gas_cost_per_order: float = 0.02  # ~$0.02 on Polygon
 
+    # Cross-path dedup cooldown (WS detector + REST sweep)
+    bundle_cooldown_seconds: float = 5.0
+
 
 @dataclass
 class OpportunityTiming:
@@ -459,7 +462,7 @@ class ArbEngine:
             if datetime.utcnow() < self._opportunity_cooldown[cooldown_key]:
                 return None
         
-        self._opportunity_cooldown[cooldown_key] = datetime.utcnow() + timedelta(seconds=2)
+        self._opportunity_cooldown[cooldown_key] = datetime.utcnow() + timedelta(seconds=self.config.bundle_cooldown_seconds)
         self._recent_opportunities[opportunity.opportunity_id] = opportunity
         self.stats.last_opportunity_time = datetime.utcnow()
         
