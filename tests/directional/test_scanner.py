@@ -151,3 +151,141 @@ async def test_scan_passes_max_markets_to_client():
     )
     await sc.scan(max_markets=123)
     assert received["max_markets"] == 123
+
+
+# ---------------------------------------------------------------------------
+# Fix 1: CAP after filtering — scan() must return at most max_markets
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_scan_caps_to_max_markets():
+    """After filtering, scan() returns at most max_markets, sorted by volume desc."""
+    markets = [mk(f"KXFOO-{i}", vol=(i + 1) * 100) for i in range(50)]
+
+    class MockClient:
+        async def list_all_markets(self, status, max_markets):
+            return markets  # returns all 50 regardless of max_markets arg
+
+    sc = KalshiMarketScanner(
+        MockClient(),
+        categorize_fn=lambda t: "Politics",
+        min_volume=50,
+        exclude_categories=[],
+    )
+    result = await sc.scan(max_markets=10)
+    assert len(result) == 10
+    # Must be the 10 highest-volume markets
+    volumes = [m.volume for m in result]
+    assert volumes == sorted(volumes, reverse=True), "results must be sorted by volume descending"
+    assert min(volumes) > max(m.volume for m in markets) - 10 * 100 - 1
+
+
+@pytest.mark.asyncio
+async def test_scan_returns_all_when_fewer_than_cap():
+    """If filtered result < max_markets, returns all surviving markets (no padding)."""
+    markets = [mk(f"KXBAR-{i}", vol=1000) for i in range(5)]
+
+    class MockClient:
+        async def list_all_markets(self, status, max_markets):
+            return markets
+
+    sc = KalshiMarketScanner(
+        MockClient(),
+        categorize_fn=lambda t: "Finance",
+        min_volume=100,
+        exclude_categories=[],
+    )
+    result = await sc.scan(max_markets=20)
+    assert len(result) == 5
+
+
+# ---------------------------------------------------------------------------
+# Fix 2: TTL cache — list_all_markets is not called on every scan
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_scan_uses_cache_within_ttl():
+    """list_all_markets is called only once when two scans happen inside the TTL."""
+    call_count = {"n": 0}
+
+    class MockClient:
+        async def list_all_markets(self, status, max_markets):
+            call_count["n"] += 1
+            return [mk("KXPOL-1", vol=500)]
+
+    t = [0.0]
+
+    sc = KalshiMarketScanner(
+        MockClient(),
+        categorize_fn=lambda _: "Politics",
+        min_volume=100,
+        exclude_categories=[],
+        cache_ttl_seconds=600,
+        _now_fn=lambda: t[0],
+    )
+
+    await sc.scan(max_markets=10)
+    t[0] = 300.0  # still inside 600s TTL
+    await sc.scan(max_markets=10)
+
+    assert call_count["n"] == 1, (
+        f"Expected list_all_markets called once (cache hit), got {call_count['n']}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_scan_refetches_after_ttl():
+    """list_all_markets is called again once the TTL has elapsed."""
+    call_count = {"n": 0}
+
+    class MockClient:
+        async def list_all_markets(self, status, max_markets):
+            call_count["n"] += 1
+            return [mk("KXPOL-1", vol=500)]
+
+    t = [0.0]
+
+    sc = KalshiMarketScanner(
+        MockClient(),
+        categorize_fn=lambda _: "Politics",
+        min_volume=100,
+        exclude_categories=[],
+        cache_ttl_seconds=600,
+        _now_fn=lambda: t[0],
+    )
+
+    await sc.scan(max_markets=10)
+    t[0] = 601.0  # past TTL
+    await sc.scan(max_markets=10)
+
+    assert call_count["n"] == 2, (
+        f"Expected list_all_markets called twice (TTL expired), got {call_count['n']}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_scan_filter_and_cap_applied_on_cache_hit():
+    """Filter + cap are applied fresh each scan even when the raw list is cached."""
+    markets = [mk(f"KXECO-{i}", vol=(i + 1) * 200) for i in range(20)]
+
+    class MockClient:
+        async def list_all_markets(self, status, max_markets):
+            return markets
+
+    t = [0.0]
+
+    sc = KalshiMarketScanner(
+        MockClient(),
+        categorize_fn=lambda _: "Economics",
+        min_volume=100,
+        exclude_categories=[],
+        cache_ttl_seconds=600,
+        _now_fn=lambda: t[0],
+    )
+
+    r1 = await sc.scan(max_markets=5)
+    t[0] = 10.0  # cache still valid
+    r2 = await sc.scan(max_markets=3)  # smaller cap on second call
+
+    assert len(r1) == 5
+    assert len(r2) == 3

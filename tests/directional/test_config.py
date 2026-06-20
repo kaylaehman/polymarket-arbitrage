@@ -41,13 +41,21 @@ def test_min_volume_loaded_from_yaml(tmp_path):
     assert cfg.directional.min_volume == 500
 
 
-# ── M2: markets_per_cycle default is 25 ───────────────────────────────────────
+# ── Fix 3: markets_per_cycle and scan_interval defaults ───────────────────────
 
-def test_directional_markets_per_cycle_default_is_25():
-    """M2: markets_per_cycle default must be 25 (not 200) to cap Claude/news load."""
+def test_directional_markets_per_cycle_default_is_15():
+    """Fix 3: markets_per_cycle default must be 15 to cap Claude/news API load per cycle."""
     cfg = DirectionalConfig()
-    assert cfg.markets_per_cycle == 25, (
-        f"markets_per_cycle default should be 25, got {cfg.markets_per_cycle}"
+    assert cfg.markets_per_cycle == 15, (
+        f"markets_per_cycle default should be 15, got {cfg.markets_per_cycle}"
+    )
+
+
+def test_directional_scan_interval_default_is_300():
+    """Fix 3: scan_interval_seconds default must be 300 (5 min) to reduce per-hour API cost."""
+    cfg = DirectionalConfig()
+    assert cfg.scan_interval_seconds == 300, (
+        f"scan_interval_seconds default should be 300, got {cfg.scan_interval_seconds}"
     )
 
 

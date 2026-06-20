@@ -231,9 +231,9 @@ class DirectionalConfig:
     """Directional trading mode config. Disabled by default (additive)."""
     enabled: bool = False
     db_path: str = "data/directional.db"
-    scan_interval_seconds: int = 60
-    # M2 FIX: default 25 (not 200) to cap Claude/news API load per cycle.
-    markets_per_cycle: int = 25
+    # Fix 3: defaults match config.yaml tuning (300s interval, 15 markets).
+    scan_interval_seconds: int = 300
+    markets_per_cycle: int = 15
     # M1 FIX: explicit field so engine.py reads it properly (not via getattr fallback).
     min_volume: int = 100
     category_exclude: list = field(default_factory=list)

@@ -217,10 +217,10 @@ database:
 # Paper-first: each strategy has its own mode: paper|live.
 # Live execution requires EXPLICIT per-strategy mode + directional.enabled: true.
 directional:
-  enabled: false                  # KILL SWITCH: never enable without paper validation
+  enabled: true                   # PAPER validation run (both strategies mode: paper)
   db_path: data/directional.db
-  scan_interval_seconds: 60
-  markets_per_cycle: 25           # M2: 25 (not 200) to cap Claude/news API load per cycle
+  scan_interval_seconds: 300      # Fix 3: 5-min interval to reduce API + AI cost per hour
+  markets_per_cycle: 15           # Fix 3: 15 (was 25) to cap Claude/news API load per cycle
   min_volume: 100                 # M1: minimum 24h volume for a market to be scanned
   category_exclude: []            # e.g. [Weather, Esports]
 
