@@ -812,33 +812,37 @@ class KalshiClient:
             KalshiOrderBook object or None if not found
         """
         data = await self._get(f"/markets/{ticker}/orderbook")
-        if not data or "orderbook" not in data:
+        if not data:
             return None
-        
-        ob = data["orderbook"]
-        
-        # Parse YES bids (prices in cents)
-        yes_bids = []
-        for level in ob.get("yes", []):
-            if len(level) >= 2:
-                price_cents = level[0]
-                quantity = level[1]
-                yes_bids.append(PriceLevel(
-                    price=price_cents / 100.0,  # Convert to dollars
-                    size=float(quantity)
-                ))
-        
-        # Parse NO bids (prices in cents)
-        no_bids = []
-        for level in ob.get("no", []):
-            if len(level) >= 2:
-                price_cents = level[0]
-                quantity = level[1]
-                no_bids.append(PriceLevel(
-                    price=price_cents / 100.0,
-                    size=float(quantity)
-                ))
-        
+
+        # Kalshi changed the orderbook response format. Newer responses use
+        # "orderbook_fp" with "yes_dollars"/"no_dollars" where price is a DOLLAR
+        # string (e.g. "0.4500"); older responses use "orderbook" with "yes"/"no"
+        # where price is INTEGER cents. Support both. Each level is [price, size];
+        # both sides are resting BIDS.
+        if data.get("orderbook_fp"):
+            obk = data["orderbook_fp"]
+            yes_raw = obk.get("yes_dollars") or []
+            no_raw = obk.get("no_dollars") or []
+            price_scale = 1.0           # already dollars
+        elif data.get("orderbook"):
+            obk = data["orderbook"]
+            yes_raw = obk.get("yes") or []
+            no_raw = obk.get("no") or []
+            price_scale = 0.01          # cents -> dollars
+        else:
+            return None
+
+        def _levels(raw):
+            out = []
+            for level in raw:
+                if level and len(level) >= 2:
+                    out.append(PriceLevel(price=float(level[0]) * price_scale, size=float(level[1])))
+            return out
+
+        yes_bids = _levels(yes_raw)
+        no_bids = _levels(no_raw)
+
         # Sort bids descending (best/highest first)
         yes_bids.sort(key=lambda x: x.price, reverse=True)
         no_bids.sort(key=lambda x: x.price, reverse=True)
