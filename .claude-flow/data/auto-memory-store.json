@@ -1,0 +1,134 @@
+[
+  {
+    "id": "task-broad-market-coverage",
+    "key": "broad-market-coverage",
+    "content": "Task completed: broad-market-coverage",
+    "namespace": "tasks",
+    "type": "task-outcome",
+    "metadata": {
+      "success": true,
+      "quality": 0.85
+    },
+    "createdAt": 1781761204927
+  },
+  {
+    "id": "task-macro-politics-matcher",
+    "key": "macro-politics-matcher",
+    "content": "Task completed: macro-politics-matcher",
+    "namespace": "tasks",
+    "type": "task-outcome",
+    "metadata": {
+      "success": true,
+      "quality": 0.85
+    },
+    "createdAt": 1781784624648
+  },
+  {
+    "id": "task-task-8-9-directional-scanner-strategy",
+    "key": "task-8-9-directional-scanner-strategy",
+    "content": "Task completed: task-8-9-directional-scanner-strategy",
+    "namespace": "tasks",
+    "type": "task-outcome",
+    "metadata": {
+      "success": true,
+      "quality": 0.85
+    },
+    "createdAt": 1781845580991
+  },
+  {
+    "id": "task-directional-scanner-bugfix",
+    "key": "directional-scanner-bugfix",
+    "content": "Task completed: directional-scanner-bugfix",
+    "namespace": "tasks",
+    "type": "task-outcome",
+    "metadata": {
+      "success": true,
+      "quality": 0.85
+    },
+    "createdAt": 1781918445690
+  },
+  {
+    "id": "task-ai-directional-efficiency-filter",
+    "key": "ai-directional-efficiency-filter",
+    "content": "Task completed: ai-directional-efficiency-filter",
+    "namespace": "tasks",
+    "type": "task-outcome",
+    "metadata": {
+      "success": true,
+      "quality": 0.85
+    },
+    "createdAt": 1781923879102
+  },
+  {
+    "id": "task-kalshi-arb-liquid-markets",
+    "key": "kalshi-arb-liquid-markets",
+    "content": "Task completed: kalshi-arb-liquid-markets",
+    "namespace": "tasks",
+    "type": "task-outcome",
+    "metadata": {
+      "success": true,
+      "quality": 0.85
+    },
+    "createdAt": 1781928403369
+  },
+  {
+    "id": "task-ws-plan-review",
+    "key": "ws-plan-review",
+    "content": "Task completed: ws-plan-review",
+    "namespace": "tasks",
+    "type": "task-outcome",
+    "metadata": {
+      "success": true,
+      "quality": 0.85
+    },
+    "createdAt": 1781935438992
+  },
+  {
+    "id": "task-ws-tasks-1-2",
+    "key": "ws-tasks-1-2",
+    "content": "Task completed: ws-tasks-1-2",
+    "namespace": "tasks",
+    "type": "task-outcome",
+    "metadata": {
+      "success": true,
+      "quality": 0.85
+    },
+    "createdAt": 1781936006200
+  },
+  {
+    "id": "task-ws-tasks-3-4-5",
+    "key": "ws-tasks-3-4-5",
+    "content": "Task completed: ws-tasks-3-4-5",
+    "namespace": "tasks",
+    "type": "task-outcome",
+    "metadata": {
+      "success": true,
+      "quality": 0.85
+    },
+    "createdAt": 1781936560056
+  },
+  {
+    "id": "task-task6-task7-ws-feeds",
+    "key": "task6-task7-ws-feeds",
+    "content": "Task completed: task6-task7-ws-feeds",
+    "namespace": "tasks",
+    "type": "task-outcome",
+    "metadata": {
+      "success": true,
+      "quality": 0.85
+    },
+    "createdAt": 1781937138059
+  },
+  {
+    "id": "task-kalshi-ws-global-seq-fix",
+    "key": "kalshi-ws-global-seq-fix",
+    "content": "Task completed: kalshi-ws-global-seq-fix",
+    "namespace": "tasks",
+    "type": "task-outcome",
+    "metadata": {
+      "success": true,
+      "quality": 0.85
+    },
+    "createdAt": 1781938610203
+  }
+]

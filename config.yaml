@@ -171,7 +171,7 @@ monitoring:
   kalshi_max_markets: 50            # cap on Kalshi markets watched (top by volume)
 
   # Kalshi WebSocket real-time feed
-  kalshi_ws_enabled: false      # SHIP GATED OFF: flip true after smoke-test (REST sweep is the only path while false)
+  kalshi_ws_enabled: false      # OFF: fixing seq-gap logic (per-subscription seq, not per-ticker)
   ws_staleness_seconds: 10.0        # treat WS book as stale if no update for this many seconds
   ws_reconcile_seconds: 120.0       # full REST reconcile interval while WS is running
 
