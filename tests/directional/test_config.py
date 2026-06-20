@@ -5,17 +5,21 @@ from utils.config_loader import load_config, DirectionalConfig, ConfigError
 
 
 def test_directional_defaults_when_absent(tmp_path):
-    cfg = load_config("config.yaml")  # existing config without changes still parses
-    assert hasattr(cfg, "directional")
-    assert cfg.directional.enabled is False
-    assert cfg.directional.caps.total_exposure == 30
-    assert cfg.directional.db_path == "data/directional.db"
+    # DirectionalConfig defaults to disabled with expected caps/db path, independent
+    # of the live config.yaml (which may be enabled for a paper-validation run).
+    from utils.config_loader import DirectionalConfig
+    dc = DirectionalConfig()
+    assert dc.enabled is False
+    assert dc.caps.total_exposure == 30
+    assert dc.db_path == "data/directional.db"
 
 
-def test_directional_disabled_when_present(tmp_path):
-    """Load the real config.yaml (with the appended directional block) and verify enabled=False."""
-    cfg = load_config("config.yaml")
-    assert cfg.directional.enabled is False
+def test_directional_enabled_parses_from_block(tmp_path):
+    # Parser reads enabled true/false from a directional block correctly, using
+    # controlled input (not the live config.yaml value, which varies operationally).
+    from utils.config_loader import _build_directional
+    assert _build_directional({"enabled": False}).enabled is False
+    assert _build_directional({"enabled": True}).enabled is True
 
 
 # ── M1: min_volume field present on DirectionalConfig ─────────────────────────
