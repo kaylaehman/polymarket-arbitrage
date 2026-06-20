@@ -45,16 +45,38 @@ class FakeKalshiClient:
         self._no_ask = no_ask
         self.place_order_calls = []
 
+    async def _get(self, endpoint, params=None):
+        """Support scanner's /events fetch: return all markets as nested events."""
+        nested = [
+            {
+                "ticker": m.ticker,
+                "event_ticker": m.event_ticker,
+                "series_ticker": getattr(m, "series_ticker", m.event_ticker),
+                "title": m.title,
+                "status": "open",
+                "close_time": None,
+                "volume": None,
+                "yes_price": None,
+                "no_price": None,
+            }
+            for m in self._markets
+        ]
+        return {"events": [{"markets": nested, "event_ticker": "FAKE"}], "cursor": None}
+
     async def list_all_markets(self, status="open", max_markets=50):
         return self._markets
 
     async def get_orderbook_unified(self, ticker):
-        # Return a minimal fake orderbook with a NO ask
+        # Return a minimal fake orderbook with a tight YES spread (≤MAX_SPREAD)
+        # centred near the market's yes_price so SafeCompounder gets correct edge.
+        market_yes = next(
+            (m.yes_price for m in self._markets if m.ticker == ticker), 0.05
+        )
         ob = SimpleNamespace()
         yes_side = SimpleNamespace()
-        yes_side.best_ask = 1.0 - self._no_ask  # derived
-        yes_side.best_bid = 0.05
-        yes_side.mid_price = 0.06
+        yes_side.best_bid = round(market_yes - 0.01, 4)
+        yes_side.best_ask = round(market_yes + 0.01, 4)
+        yes_side.mid_price = market_yes
         no_side = SimpleNamespace()
         no_side.best_ask = self._no_ask
         no_side.best_bid = self._no_ask - 0.01

@@ -113,38 +113,23 @@ class DirectionalEngine:
         return 100.0
 
     def _build_sc_ctx(self) -> dict:
-        """Build SafeCompounder context with a no_ask closure over kalshi_client."""
-        # no_ask is fetched from the orderbook synchronously using a stored cache.
-        # The scan is async so we resolve orderbooks before calling scan().
-        # Here we store a dict that scan() will look up.
-        cache: dict[str, float | None] = {}
+        """Build SafeCompounder context using scanner's already-fetched books.
 
+        The scanner populates ``scanner.last_books`` during scan(), so no second
+        round of orderbook fetches is needed here.  The closure delegates to
+        ``scanner.no_ask(ticker)`` which reads from ``scanner.last_books``.
+        """
         def no_ask_fn(ticker: str) -> float | None:
-            return cache.get(ticker)
+            return self.scanner.no_ask(ticker)
 
-        return {"no_ask": no_ask_fn, "_cache": cache}
-
-    async def _populate_sc_ctx(self, markets: list, ctx: dict) -> None:
-        """Async-populate the no_ask cache from real orderbooks."""
-        cache = ctx["_cache"]
-        for m in markets:
-            try:
-                ob = await self._client.get_orderbook_unified(m.ticker)
-                if ob is not None and ob.no is not None:
-                    ask = getattr(ob.no, "best_ask", None)
-                    cache[m.ticker] = ask
-                else:
-                    cache[m.ticker] = None
-            except Exception:
-                cache[m.ticker] = None
+        return {"no_ask": no_ask_fn}
 
     async def run_once(self) -> None:
         """Execute one full scan → decide → execute → sweep cycle."""
         markets = await self.scanner.scan(self._cfg.markets_per_cycle)
 
-        # Build SafeCompounder context (needs async orderbook fetches)
+        # SafeCompounder context — no_ask reads from scanner.last_books (no re-fetch)
         sc_ctx = self._build_sc_ctx()
-        await self._populate_sc_ctx(markets, sc_ctx)
 
         for strategy, strat_cfg in self._strategies:
             # Build per-strategy context
