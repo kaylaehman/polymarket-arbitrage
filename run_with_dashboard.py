@@ -816,7 +816,6 @@ class TradingBotWithDashboard:
                 ws_client = None
         else:
             import time as _time
-            from core.kalshi_ws_detector import decide_detection_mode
 
         prev_mode = "rest"
 
