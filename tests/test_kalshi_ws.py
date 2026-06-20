@@ -155,3 +155,187 @@ class TestBookToOrderbook:
         apply_snapshot(state, _snapshot_msg([(0.5, 100.0)], [(0.45, 100.0)]))
         ob = book_to_orderbook("SOME-TICKER", state)
         assert ob.market_id == "kalshi:SOME-TICKER"
+
+
+# ── Task 3: KalshiWSClient (connect/subscribe/reconnect) ─────────────────────
+
+import asyncio
+import json
+
+from kalshi_client.ws import KalshiWSClient
+
+
+class FakeWS:
+    """Minimal fake WebSocket: pops messages from a list, raises CancelledError when empty."""
+
+    def __init__(self, messages: list):
+        self._msgs = list(messages)
+        self.sent: list = []
+
+    async def send(self, m: str) -> None:
+        self.sent.append(json.loads(m))
+
+    async def recv(self) -> str:
+        if self._msgs:
+            return self._msgs.pop(0)
+        raise asyncio.CancelledError
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+
+class _FakeKalshi:
+    def _auth_headers(self, method: str, path: str) -> dict:
+        return {}
+
+
+def _ws_snapshot(ticker: str, seq: int, yes_levels=None, no_levels=None) -> str:
+    """Build a full outer WS envelope with an orderbook_snapshot inner msg."""
+    yes_levels = yes_levels or [[0.40, 100]]
+    no_levels = no_levels or [[0.55, 200]]
+    return json.dumps({
+        "type": "orderbook_snapshot",
+        "seq": seq,
+        "msg": {
+            "market_ticker": ticker,
+            "yes_dollars_fp": [[str(p), str(s)] for p, s in yes_levels],
+            "no_dollars_fp": [[str(p), str(s)] for p, s in no_levels],
+        },
+    })
+
+
+def _ws_delta(ticker: str, seq: int, side: str, price: float, delta: float) -> str:
+    """Build a full outer WS envelope with an orderbook_delta inner msg."""
+    return json.dumps({
+        "type": "orderbook_delta",
+        "seq": seq,
+        "msg": {
+            "market_ticker": ticker,
+            "side": side,
+            "price_dollars": str(price),
+            "delta_fp": str(delta),
+        },
+    })
+
+
+async def test_ws_client_subscribes_and_routes_updates():
+    """Client sends a subscribe command and routes snapshot to on_book_update."""
+    snap = _ws_snapshot("KX-1", seq=1, yes_levels=[[0.40, 100]], no_levels=[[0.55, 200]])
+    fake = FakeWS([snap])
+    updates = []
+
+    async def on_update(t, ob):
+        updates.append(t)
+
+    c = KalshiWSClient(
+        _FakeKalshi(),
+        on_book_update=on_update,
+        connect_fn=lambda url, additional_headers=None: fake,
+    )
+    try:
+        await asyncio.wait_for(c.run(["KX-1"]), timeout=1)
+    except (asyncio.CancelledError, asyncio.TimeoutError):
+        pass
+
+    assert fake.sent, "expected at least one sent message"
+    assert fake.sent[0]["cmd"] == "subscribe"
+    assert "KX-1" in fake.sent[0]["params"]["market_tickers"]
+    assert updates == ["KX-1"]
+    assert c.books.get("KX-1") is not None
+
+
+async def test_seq_gap_drops_book():
+    """A delta with seq != last_seq+1 drops the book state; no update emitted.
+
+    Prevents phantom arb signals on live money: a gap means we missed events,
+    so the locally-maintained book is stale. Drop it and wait for a fresh snapshot.
+    """
+    snap = _ws_snapshot("KX-1", seq=1, yes_levels=[[0.40, 100]], no_levels=[[0.55, 200]])
+    # seq=3 but last_seq was 1 → gap (expected 2)
+    bad_delta = _ws_delta("KX-1", seq=3, side="yes", price=0.40, delta=-100)
+    fake = FakeWS([snap, bad_delta])
+    updates = []
+
+    async def on_update(t, ob):
+        updates.append((t, ob))
+
+    c = KalshiWSClient(
+        _FakeKalshi(),
+        on_book_update=on_update,
+        connect_fn=lambda url, additional_headers=None: fake,
+    )
+    try:
+        await asyncio.wait_for(c.run(["KX-1"]), timeout=1)
+    except (asyncio.CancelledError, asyncio.TimeoutError):
+        pass
+
+    # Snapshot fires one update; bad delta must NOT fire a second update
+    assert len(updates) == 1
+    # After gap the book is dropped: best_ask_yes is None
+    assert c.books.get("KX-1") is None or c.books["KX-1"].best_ask_yes is None
+
+
+async def test_envelope_unwrap_updates_book():
+    """Feed a full envelope; assert the book updates correctly (proves unwrap works)."""
+    snap = _ws_snapshot("KX-2", seq=1, yes_levels=[[0.60, 50]], no_levels=[[0.35, 80]])
+    fake = FakeWS([snap])
+    updates = []
+
+    async def on_update(t, ob):
+        updates.append((t, ob))
+
+    c = KalshiWSClient(
+        _FakeKalshi(),
+        on_book_update=on_update,
+        connect_fn=lambda url, additional_headers=None: fake,
+    )
+    try:
+        await asyncio.wait_for(c.run(["KX-2"]), timeout=1)
+    except (asyncio.CancelledError, asyncio.TimeoutError):
+        pass
+
+    assert updates, "expected at least one book update"
+    ticker, ob = updates[0]
+    assert ticker == "KX-2"
+    # no bid 0.35 → yes ask = 1 - 0.35 = 0.65
+    assert round(ob.best_ask_yes, 2) == 0.65
+
+
+async def test_reconnect_after_one_failure():
+    """connect_fn raises once then returns a fake with a snapshot; update is routed."""
+    snap = _ws_snapshot("KX-3", seq=1, yes_levels=[[0.55, 100]], no_levels=[[0.40, 150]])
+
+    attempt = [0]
+    fake = FakeWS([snap])
+
+    def fake_connect(url, additional_headers=None):
+        attempt[0] += 1
+        if attempt[0] == 1:
+            raise OSError("simulated connection failure")
+        return fake
+
+    updates = []
+
+    async def on_update(t, ob):
+        updates.append(t)
+
+    # inject sleep_fn so the exponential backoff doesn't actually wait
+    async def no_sleep(s):
+        pass
+
+    c = KalshiWSClient(
+        _FakeKalshi(),
+        on_book_update=on_update,
+        connect_fn=fake_connect,
+        sleep_fn=no_sleep,
+    )
+    try:
+        await asyncio.wait_for(c.run(["KX-3"]), timeout=2)
+    except (asyncio.CancelledError, asyncio.TimeoutError):
+        pass
+
+    assert attempt[0] >= 2, "expected at least two connection attempts"
+    assert updates == ["KX-3"]

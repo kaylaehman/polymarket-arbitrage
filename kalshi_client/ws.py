@@ -1,21 +1,30 @@
 """
-Kalshi WebSocket book maintenance (pure, no socket).
+Kalshi WebSocket book maintenance and client.
 
-Provides _BookState and the three functions that mutate it:
+Provides _BookState and the three pure functions that mutate it:
   apply_snapshot  — reset from a full orderbook_snapshot msg
   apply_delta     — apply a signed cumulative orderbook_delta msg
   book_to_orderbook — convert _BookState to a unified OrderBook
 
-Mirrors the logic in kalshi_client/models.py::KalshiOrderBook.to_unified_orderbook
-and kalshi_client/api.py::get_orderbook_unified exactly so the WS path and the
-REST path produce identical OrderBook objects.
+Also provides KalshiWSClient, which connects to the Kalshi orderbook_delta
+WS channel, maintains per-ticker _BookState, and fires an async callback on
+every valid book update.
+
+The WS path "/trade-api/ws/v2" is passed VERBATIM to _auth_headers — do NOT
+prefix it with the REST base URL.  The signing scheme expects exactly this path.
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
+import logging
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional
+from typing import Any, Awaitable, Callable, Optional
+
+import websockets
 
 from polymarket_client.models import (
     OrderBook,
@@ -24,6 +33,12 @@ from polymarket_client.models import (
     TokenOrderBook,
     TokenType,
 )
+
+logger = logging.getLogger(__name__)
+
+_WS_URL = "wss://api.elections.kalshi.com/trade-api/ws/v2"
+# _WS_PATH is passed VERBATIM to _auth_headers — do not prefix with base URL
+_WS_PATH = "/trade-api/ws/v2"
 
 
 @dataclass
@@ -122,3 +137,154 @@ def book_to_orderbook(ticker: str, state: _BookState) -> OrderBook:
         no=no_token_ob,
         timestamp=datetime.utcnow(),
     )
+
+
+# ── KalshiWSClient ────────────────────────────────────────────────────────────
+
+_OnBookUpdate = Callable[[str, OrderBook], Awaitable[None]]
+_ConnectFn = Any  # callable(url, additional_headers=...) -> async context manager
+_SleepFn = Callable[[float], Awaitable[None]]
+
+_BACKOFF_BASE = 1.0
+_BACKOFF_CAP = 30.0
+
+
+class KalshiWSClient:
+    """Event-driven Kalshi orderbook WebSocket client.
+
+    Connects to the Kalshi WS endpoint, subscribes to orderbook_delta for a
+    set of tickers, maintains per-ticker _BookState, and calls on_book_update
+    after every valid update.
+
+    on_book_update is ALWAYS async — KalshiWSClient always awaits it.  Do not
+    pass a sync callable; the call would succeed but the coroutine would be
+    silently dropped on the live submit path.
+    """
+
+    def __init__(
+        self,
+        kalshi_client: Any,
+        on_book_update: _OnBookUpdate,
+        connect_fn: _ConnectFn = websockets.connect,
+        sleep_fn: _SleepFn = asyncio.sleep,
+    ) -> None:
+        self._kalshi = kalshi_client
+        self._on_book_update = on_book_update
+        self._connect_fn = connect_fn
+        self._sleep_fn = sleep_fn
+
+        self.state: str = "disconnected"
+        self.last_message_ts: Optional[float] = None
+        self.books: dict[str, OrderBook] = {}
+
+        self._states: dict[str, _BookState] = {}
+        self._tickers: list[str] = []
+        self._stop_event = asyncio.Event()
+        self._msg_id: int = 0
+
+    # ── public API ──────────────────────────────────────────────────────────
+
+    async def run(self, tickers: list[str]) -> None:
+        """Connect, subscribe, and loop until stop() is called."""
+        self._tickers = list(tickers)
+        self._stop_event.clear()
+        backoff = _BACKOFF_BASE
+
+        while not self._stop_event.is_set():
+            self.state = "connecting"
+            try:
+                headers = self._kalshi._auth_headers("GET", _WS_PATH)
+                async with self._connect_fn(_WS_URL, additional_headers=headers) as ws:
+                    self.state = "connected"
+                    backoff = _BACKOFF_BASE
+                    await self._subscribe(ws, self._tickers)
+                    await self._read_loop(ws)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.warning("KalshiWSClient disconnected: %s — reconnecting in %.0fs", exc, backoff)
+                self.state = "reconnecting"
+                await self._sleep_fn(backoff)
+                backoff = min(backoff * 2, _BACKOFF_CAP)
+
+        self.state = "disconnected"
+
+    async def stop(self) -> None:
+        """Signal the run loop to exit cleanly."""
+        self._stop_event.set()
+
+    def resubscribe(self, tickers: list[str]) -> None:
+        """Update the watched set (takes effect on next reconnect only)."""
+        self._tickers = list(tickers)
+
+    # ── internals ───────────────────────────────────────────────────────────
+
+    async def _subscribe(self, ws: Any, tickers: list[str]) -> None:
+        self._msg_id += 1
+        await ws.send(json.dumps({
+            "id": self._msg_id,
+            "cmd": "subscribe",
+            "params": {
+                "channels": ["orderbook_delta"],
+                "market_tickers": tickers,
+            },
+        }))
+
+    async def _read_loop(self, ws: Any) -> None:
+        while not self._stop_event.is_set():
+            raw = await ws.recv()
+            try:
+                frame = json.loads(raw)
+            except json.JSONDecodeError:
+                logger.warning("KalshiWSClient: unparseable frame: %s", raw[:200])
+                continue
+            await self._route_frame(frame)
+
+    async def _route_frame(self, frame: dict) -> None:
+        ftype = frame.get("type", "")
+        seq = frame.get("seq")
+
+        if ftype == "subscribed":
+            return
+        if ftype == "error":
+            logger.error("KalshiWSClient error frame: %s", frame)
+            return
+
+        msg = frame.get("msg", {})
+        ticker = msg.get("market_ticker") or msg.get("ticker")
+        if not ticker:
+            return
+
+        if ftype == "orderbook_snapshot":
+            state = _BookState()
+            apply_snapshot(state, msg)
+            state.last_seq = seq
+            self._states[ticker] = state
+            await self._emit_update(ticker, state)
+
+        elif ftype == "orderbook_delta":
+            state = self._states.get(ticker)
+            if state is None or state.last_seq is None:
+                # Awaiting fresh snapshot — drop delta
+                logger.debug("KalshiWSClient: delta before snapshot for %s, dropping", ticker)
+                return
+
+            if seq != state.last_seq + 1:
+                # Sequence gap: drop state, wait for next snapshot
+                logger.warning(
+                    "KalshiWSClient: seq gap for %s (got %s, expected %s) — dropping book",
+                    ticker, seq, state.last_seq + 1,
+                )
+                self._states[ticker] = _BookState()  # awaiting-snapshot
+                self.books.pop(ticker, None)
+                return
+
+            apply_delta(state, msg)
+            state.last_seq = seq
+            await self._emit_update(ticker, state)
+
+    async def _emit_update(self, ticker: str, state: _BookState) -> None:
+        ob = book_to_orderbook(ticker, state)
+        self.books[ticker] = ob
+        self.last_message_ts = time.monotonic()
+        await self._on_book_update(ticker, ob)
