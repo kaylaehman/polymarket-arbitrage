@@ -217,7 +217,7 @@ database:
 # Paper-first: each strategy has its own mode: paper|live.
 # Live execution requires EXPLICIT per-strategy mode + directional.enabled: true.
 directional:
-  enabled: true                   # PAPER validation run (both strategies mode: paper)
+  enabled: false                  # OFF: blocked on Kalshi liquid-market data layer (see docs)
   db_path: data/directional.db
   scan_interval_seconds: 300      # Fix 3: 5-min interval to reduce API + AI cost per hour
   markets_per_cycle: 15           # Fix 3: 15 (was 25) to cap Claude/news API load per cycle
