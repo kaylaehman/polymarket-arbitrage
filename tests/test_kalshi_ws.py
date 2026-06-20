@@ -339,3 +339,204 @@ async def test_reconnect_after_one_failure():
 
     assert attempt[0] >= 2, "expected at least two connection attempts"
     assert updates == ["KX-3"]
+
+
+# ── Task 7: Integration tests (Tasks 6+7 cross-path dedup) ───────────────────
+
+import json as _json
+
+from core.arb_engine import ArbEngine, ArbConfig
+from core.kalshi_ws_detector import WSBundleDetector
+from polymarket_client.models import (
+    Market,
+    MarketState,
+    OrderBook,
+    OrderBookSide,
+    PriceLevel,
+    TokenOrderBook,
+    TokenType,
+)
+
+
+def _make_arb_orderbook(market_id: str, total_ask: float = 0.75, size: float = 500.0) -> OrderBook:
+    """Build an OrderBook where best_ask_yes + best_ask_no == total_ask.
+
+    Splits the total_ask evenly across YES and NO ask sides.
+    Also populates bids so ArbEngine sizing logic has non-None values.
+    """
+    half = total_ask / 2.0
+    yes_ask = half
+    no_ask = half
+    yes_bid = yes_ask - 0.05
+    no_bid = no_ask - 0.05
+    return OrderBook(
+        market_id=market_id,
+        yes=TokenOrderBook(
+            token_type=TokenType.YES,
+            bids=OrderBookSide(levels=[PriceLevel(price=yes_bid, size=size)]),
+            asks=OrderBookSide(levels=[PriceLevel(price=yes_ask, size=size)]),
+        ),
+        no=TokenOrderBook(
+            token_type=TokenType.NO,
+            bids=OrderBookSide(levels=[PriceLevel(price=no_bid, size=size)]),
+            asks=OrderBookSide(levels=[PriceLevel(price=no_ask, size=size)]),
+        ),
+    )
+
+
+def _make_ws_snapshot_msg(ticker: str, yes_bid: float, no_bid: float, seq: int = 1) -> str:
+    """Build a WS envelope with an orderbook_snapshot whose book will have
+    best_ask_yes = 1 - no_bid and best_ask_no = 1 - yes_bid (WS derivation)."""
+    return _json.dumps({
+        "type": "orderbook_snapshot",
+        "seq": seq,
+        "msg": {
+            "market_ticker": ticker,
+            "yes_dollars_fp": [[str(yes_bid), "500.0"]],
+            "no_dollars_fp": [[str(no_bid), "500.0"]],
+        },
+    })
+
+
+def _make_ws_delta_msg(ticker: str, side: str, price: float, delta: float, seq: int = 2) -> str:
+    """Build a WS envelope with an orderbook_delta."""
+    return _json.dumps({
+        "type": "orderbook_delta",
+        "seq": seq,
+        "msg": {
+            "market_ticker": ticker,
+            "side": side,
+            "price_dollars": str(price),
+            "delta_fp": str(delta),
+        },
+    })
+
+
+class _FakeArbEngine:
+    """Thin fake arb engine: returns a signal when total_ask < 1.00.
+
+    Uses a real Signal-like stub so WSBundleDetector can iterate over it.
+    """
+
+    def __init__(self):
+        self.call_count = 0
+
+    def analyze(self, market_state: MarketState):
+        self.call_count += 1
+        ob = market_state.order_book
+        if ob.best_ask_yes is not None and ob.best_ask_no is not None:
+            if ob.best_ask_yes + ob.best_ask_no < 1.00:
+                return [_FakeSignal(market_state.market.market_id)]
+        return []
+
+
+class _FakeSignal:
+    """Minimal signal stub — only needs market_id; opportunity is None (safe to skip)."""
+
+    def __init__(self, market_id: str):
+        self.market_id = market_id
+        self.opportunity = None
+
+
+class _FakeExecEngine:
+    """Async stub execution engine that records submitted signals."""
+
+    def __init__(self):
+        self.submitted: list = []
+
+    async def submit_signal(self, signal) -> None:
+        self.submitted.append(signal)
+
+
+async def test_e2e_snapshot_delta_routes_one_signal():
+    """Drive KalshiWSClient (fake transport) with snapshot+delta that produces a
+    book where best_ask_yes + best_ask_no < 1.00; assert exactly ONE signal submitted.
+
+    The WS-derived orderbook has:
+        best_ask_yes = 1 - no_bid
+        best_ask_no  = 1 - yes_bid
+    Starting snapshot: yes_bid=0.55, no_bid=0.40 → total_ask=1.05 (no signal)
+    After delta: yes_bid increases to 0.65 → best_ask_no = 0.35, total_ask = 0.95 < 1.00 (signal)
+    """
+    ticker = "TASK7-A"
+    # Snapshot: yes_bid=0.55, no_bid=0.40 → best_ask_yes=0.60, best_ask_no=0.45, total=1.05
+    snap = _make_ws_snapshot_msg(ticker, yes_bid=0.55, no_bid=0.40, seq=1)
+    # Delta: add size to yes bid at 0.65 (new best yes bid)
+    # → best_ask_no = 1 - 0.65 = 0.35, total_ask = 0.60 + 0.35 = 0.95 < 1.00
+    delta = _make_ws_delta_msg(ticker, side="yes", price=0.65, delta=300.0, seq=2)
+
+    fake_ws = FakeWS([snap, delta])
+    exec_engine = _FakeExecEngine()
+    fake_arb = _FakeArbEngine()
+
+    detector = WSBundleDetector(
+        arb_engine=fake_arb,
+        execution_engine=exec_engine,
+        market_titles={ticker: "Task 7 test market"},
+    )
+
+    ws_client = KalshiWSClient(
+        _FakeKalshi(),
+        on_book_update=detector.on_book_update,
+        connect_fn=lambda url, additional_headers=None: fake_ws,
+    )
+
+    try:
+        await asyncio.wait_for(ws_client.run([ticker]), timeout=2)
+    except (asyncio.CancelledError, asyncio.TimeoutError):
+        pass
+
+    # The arb engine should have been called twice (snapshot + delta)
+    assert fake_arb.call_count == 2, (
+        f"Expected 2 arb engine calls (snapshot + delta), got {fake_arb.call_count}"
+    )
+    # Exactly ONE signal submitted (only the delta produces total_ask < 1.00)
+    assert len(exec_engine.submitted) == 1, (
+        f"Expected exactly 1 submitted signal, got {len(exec_engine.submitted)}"
+    )
+    assert exec_engine.submitted[0].market_id == f"kalshi:{ticker}"
+
+
+async def test_duplicate_suppression_via_shared_engine():
+    """Two on_book_update calls through the SAME real ArbEngine instance within 2s
+    must yield only ONE submitted signal — the engine's _opportunity_cooldown dedup
+    suppresses the second.  This is the cross-path dedup invariant.
+
+    We use a real ArbEngine with zero fees so a bundle-long signal is reliably
+    produced, then call on_book_update twice in rapid succession and assert that
+    only one signal reaches the execution engine.
+    """
+    ticker = "TASK7-B"
+
+    # ArbEngine with zero fees: any total_ask < 0.99 produces a signal
+    real_engine = ArbEngine(ArbConfig(
+        min_edge=0.01,
+        bundle_arb_enabled=True,
+        mm_enabled=False,
+        taker_fee_bps=0,
+        maker_fee_bps=0,
+        gas_cost_per_order=0.0,
+    ))
+
+    exec_engine = _FakeExecEngine()
+
+    detector = WSBundleDetector(
+        arb_engine=real_engine,
+        execution_engine=exec_engine,
+        market_titles={ticker: "Task 7 dedup test market"},
+        cooldown_s=0.0,  # Disable detector-level cooldown so only engine cooldown applies
+    )
+
+    # Build an OrderBook with total_ask = 0.75 (well below threshold)
+    ob = _make_arb_orderbook(f"kalshi:{ticker}", total_ask=0.75)
+
+    # First call — should produce a signal
+    await detector.on_book_update(ticker, ob)
+    # Second call immediately — engine cooldown (2s) suppresses
+    await detector.on_book_update(ticker, ob)
+
+    # Cross-path dedup: only ONE signal submitted despite two calls
+    assert len(exec_engine.submitted) == 1, (
+        f"Cross-path dedup invariant violated: expected 1 submitted signal, "
+        f"got {len(exec_engine.submitted)} — shared engine _opportunity_cooldown must suppress duplicates"
+    )
