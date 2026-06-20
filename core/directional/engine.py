@@ -80,6 +80,8 @@ class DirectionalEngine:
                     intelligence_engine=intelligence_engine,
                     min_confidence=ai_cfg.min_confidence,
                     min_edge_pct=ai_cfg.min_edge_pct,
+                    max_days_to_resolution=getattr(ai_cfg, "max_days_to_resolution", 45.0),
+                    categories=list(getattr(ai_cfg, "categories", []) or []),
                 ), ai_cfg)
             )
 

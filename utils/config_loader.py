@@ -224,6 +224,9 @@ class AiDirectionalCfg:
     stop_loss_pct: float = 0.30    # fraction of entry price below which to close
     take_profit_pct: float = 0.50  # fraction of entry price above which to close
     max_hold_hours: float = 72.0
+    # Efficiency filter: skip markets too far out or in wrong category.
+    max_days_to_resolution: float = 45.0  # skip markets closing more than N days out
+    categories: list = field(default_factory=list)  # empty = no category restriction
 
 
 @dataclass

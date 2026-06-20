@@ -5,10 +5,17 @@ DirectionalCandidate when confidence and edge gates are met.
 
 Fail-safe: any exception in per-market processing is caught; that market
 is skipped without propagating the error.
+
+Efficiency filter: markets are pre-screened before any Claude/NewsAPI call.
+Markets are skipped when:
+  - category restriction is active and market.category is not in the allow-list, or
+  - close_time is in the past or more than max_days_to_resolution days from now.
+  Markets with close_time=None are always evaluated (missing data ≠ far future).
 """
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 from core.directional.models import DirectionalCandidate
@@ -27,6 +34,11 @@ class AiDirectional(Strategy):
         intelligence_engine: Object with ``evaluate(**kwargs) -> SignalSummary|None``.
         min_confidence: Minimum signal confidence required (e.g. 0.60).
         min_edge_pct: Minimum |edge_vs_market| required (e.g. 0.05 = 5 cents).
+        max_days_to_resolution: Skip markets whose close_time is more than this many
+            days from now (or in the past). Default 45.0. Markets with no close_time
+            are never filtered by this rule.
+        categories: If non-empty, only markets whose category is in this set are
+            evaluated. Empty list (default) disables category filtering.
     """
 
     def __init__(
@@ -34,14 +46,46 @@ class AiDirectional(Strategy):
         intelligence_engine: Any,
         min_confidence: float,
         min_edge_pct: float,
+        max_days_to_resolution: float = 45.0,
+        categories: list | None = None,
     ) -> None:
         self._intel = intelligence_engine
         self._min_confidence = min_confidence
         self._min_edge_pct = min_edge_pct
+        self._max_days = max_days_to_resolution
+        self._categories: set[str] = set(categories or [])
 
     @property
     def name(self) -> str:
         return "ai_directional"
+
+    def _should_skip(self, market: KalshiMarket) -> bool:
+        """Return True if this market should be skipped by the efficiency filter."""
+        if self._categories and market.category not in self._categories:
+            logger.debug(
+                "AiDirectional: skipping %s — category '%s' not in allow-list",
+                market.ticker, market.category,
+            )
+            return True
+
+        close = market.close_time
+        if close is None:
+            return False
+
+        # Normalise naive datetimes to UTC.
+        if close.tzinfo is None:
+            close = close.replace(tzinfo=timezone.utc)
+
+        now = datetime.now(timezone.utc)
+        delta_days = (close - now).total_seconds() / 86400.0
+        if delta_days <= 0 or delta_days > self._max_days:
+            logger.debug(
+                "AiDirectional: skipping %s — %.1f days to resolution (max=%.1f)",
+                market.ticker, delta_days, self._max_days,
+            )
+            return True
+
+        return False
 
     async def scan(
         self,
@@ -52,9 +96,12 @@ class AiDirectional(Strategy):
         candidates: list[DirectionalCandidate] = []
 
         for m in markets:
+            if self._should_skip(m):
+                continue
+
             try:
                 summary = await self._intel.evaluate(
-                    market_id=m.ticker,
+                    market_id=m.to_unified_market_id(),
                     market_question=m.title,
                     current_yes_price=m.yes_price,
                     arb_edge=0.0,

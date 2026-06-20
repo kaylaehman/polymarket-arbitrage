@@ -242,3 +242,5 @@ directional:
     stop_loss_pct: 0.30
     take_profit_pct: 0.50
     max_hold_hours: 72.0
+    max_days_to_resolution: 45    # skip markets closing more than 45 days out (avoids wasted Claude/NewsAPI calls)
+    categories: []                # restrict to these categories; empty = no restriction (e.g. [Politics, Finance])
