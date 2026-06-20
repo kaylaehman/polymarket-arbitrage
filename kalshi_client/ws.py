@@ -47,14 +47,12 @@ class _BookState:
 
     yes: dict[float, float] = field(default_factory=dict)  # price -> resting size
     no: dict[float, float] = field(default_factory=dict)
-    last_seq: Optional[int] = None
 
 
 def apply_snapshot(state: _BookState, msg: dict) -> None:
     """Reset *state* from an orderbook_snapshot msg dict.
 
     Prices and sizes in the msg are dollar strings, e.g. "0.6000", "3000.00".
-    The caller is responsible for updating state.last_seq from the frame envelope.
     """
     state.yes = {
         float(price): float(size)
@@ -139,6 +137,14 @@ def book_to_orderbook(ticker: str, state: _BookState) -> OrderBook:
     )
 
 
+class _SeqGapError(Exception):
+    """Raised when a global subscription seq gap is detected.
+
+    Propagates out of _read_loop so the run() reconnect path fires immediately,
+    resetting _last_seq and resubscribing to get fresh snapshots for all tickers.
+    """
+
+
 # ── KalshiWSClient ────────────────────────────────────────────────────────────
 
 _OnBookUpdate = Callable[[str, OrderBook], Awaitable[None]]
@@ -181,6 +187,7 @@ class KalshiWSClient:
         self._tickers: list[str] = []
         self._stop_event = asyncio.Event()
         self._msg_id: int = 0
+        self._last_seq: Optional[int] = None  # global per-subscription seq counter
 
     # ── public API ──────────────────────────────────────────────────────────
 
@@ -197,6 +204,7 @@ class KalshiWSClient:
                 async with self._connect_fn(_WS_URL, additional_headers=headers) as ws:
                     self.state = "connected"
                     backoff = _BACKOFF_BASE
+                    self._last_seq = None  # reset on every (re)connect before subscribing
                     await self._subscribe(ws, self._tickers)
                     await self._read_loop(ws)
             except asyncio.CancelledError:
@@ -255,32 +263,41 @@ class KalshiWSClient:
         if not ticker:
             return
 
+        # ── Global seq gap detection ───────────────────────────────────────
+        # Kalshi's seq is a single counter PER subscription (per sid), shared
+        # across ALL subscribed tickers.  A gap in the global seq means a
+        # message was dropped on the wire — we don't know which ticker's book
+        # is now stale, so ALL books must be discarded and resynced.
+        if seq is not None and self._last_seq is not None:
+            if seq != self._last_seq + 1:
+                logger.warning(
+                    "KalshiWSClient: global seq gap (got %s, expected %s) — "
+                    "dropping all books and reconnecting",
+                    seq, self._last_seq + 1,
+                )
+                self.books.clear()
+                self._states.clear()
+                raise _SeqGapError(f"seq gap: got {seq}, expected {self._last_seq + 1}")
+
+        if seq is not None:
+            self._last_seq = seq
+
         if ftype == "orderbook_snapshot":
+            # A snapshot is always a full reset of that ticker's book — valid
+            # even mid-stream (without a global-seq gap).
             state = _BookState()
             apply_snapshot(state, msg)
-            state.last_seq = seq
             self._states[ticker] = state
             await self._emit_update(ticker, state)
 
         elif ftype == "orderbook_delta":
             state = self._states.get(ticker)
-            if state is None or state.last_seq is None:
-                # Awaiting fresh snapshot — drop delta
+            if state is None:
+                # No snapshot received yet for this ticker — drop delta.
                 logger.debug("KalshiWSClient: delta before snapshot for %s, dropping", ticker)
                 return
 
-            if seq != state.last_seq + 1:
-                # Sequence gap: drop state, wait for next snapshot
-                logger.warning(
-                    "KalshiWSClient: seq gap for %s (got %s, expected %s) — dropping book",
-                    ticker, seq, state.last_seq + 1,
-                )
-                self._states[ticker] = _BookState()  # awaiting-snapshot
-                self.books.pop(ticker, None)
-                return
-
             apply_delta(state, msg)
-            state.last_seq = seq
             await self._emit_update(ticker, state)
 
     async def _emit_update(self, ticker: str, state: _BookState) -> None:

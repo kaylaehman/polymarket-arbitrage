@@ -247,20 +247,31 @@ async def test_ws_client_subscribes_and_routes_updates():
     assert c.books.get("KX-1") is not None
 
 
-async def test_seq_gap_drops_book():
-    """A delta with seq != last_seq+1 drops the book state; no update emitted.
+async def test_interleaved_tickers_no_false_gap():
+    """Interleaved per-ticker seqs must NOT trigger a false gap on the global counter.
 
-    Prevents phantom arb signals on live money: a gap means we missed events,
-    so the locally-maintained book is stale. Drop it and wait for a fresh snapshot.
+    This is the core regression test for the bug found in live smoke-testing:
+    Kalshi's seq is a SINGLE counter per subscription (per sid), shared across all
+    subscribed tickers.  With 50 tickers, snapshots take global seqs 1..50 and
+    a delta for ticker A arriving at global seq 51 is valid even though ticker A's
+    own snapshot was at global seq 1 (not 50).
+
+    Sequence fed:
+        seq=1  orderbook_snapshot  ticker A   (global counter starts)
+        seq=2  orderbook_snapshot  ticker B
+        seq=3  orderbook_delta     ticker A   (globally contiguous — NOT a gap)
+
+    Expected: NO reconnect, both books populated, A's book reflects the delta.
     """
-    snap = _ws_snapshot("KX-1", seq=1, yes_levels=[[0.40, 100]], no_levels=[[0.55, 200]])
-    # seq=3 but last_seq was 1 → gap (expected 2)
-    bad_delta = _ws_delta("KX-1", seq=3, side="yes", price=0.40, delta=-100)
-    fake = FakeWS([snap, bad_delta])
+    snap_a = _ws_snapshot("KX-A", seq=1, yes_levels=[[0.40, 100]], no_levels=[[0.55, 200]])
+    snap_b = _ws_snapshot("KX-B", seq=2, yes_levels=[[0.50, 80]],  no_levels=[[0.45, 90]])
+    # Delta removes the yes level at 0.40 from A's book
+    delta_a = _ws_delta("KX-A", seq=3, side="yes", price=0.40, delta=-100)
+    fake = FakeWS([snap_a, snap_b, delta_a])
     updates = []
 
     async def on_update(t, ob):
-        updates.append((t, ob))
+        updates.append(t)
 
     c = KalshiWSClient(
         _FakeKalshi(),
@@ -268,14 +279,80 @@ async def test_seq_gap_drops_book():
         connect_fn=lambda url, additional_headers=None: fake,
     )
     try:
-        await asyncio.wait_for(c.run(["KX-1"]), timeout=1)
+        await asyncio.wait_for(c.run(["KX-A", "KX-B"]), timeout=1)
     except (asyncio.CancelledError, asyncio.TimeoutError):
         pass
 
-    # Snapshot fires one update; bad delta must NOT fire a second update
-    assert len(updates) == 1
-    # After gap the book is dropped: best_ask_yes is None
-    assert c.books.get("KX-1") is None or c.books["KX-1"].best_ask_yes is None
+    # All three frames processed without dropping any book
+    assert updates == ["KX-A", "KX-B", "KX-A"], (
+        f"Expected 3 updates (snap-A, snap-B, delta-A), got {updates}"
+    )
+    # Both books are present
+    assert c.books.get("KX-A") is not None, "KX-A book must be present after delta"
+    assert c.books.get("KX-B") is not None, "KX-B book must be present after snap"
+    # A's yes level at 0.40 was removed by the delta
+    a_state = c._states.get("KX-A")
+    assert a_state is not None
+    assert 0.40 not in a_state.yes, "delta should have removed the yes level at 0.40 from KX-A"
+
+
+async def test_global_seq_gap_triggers_resync():
+    """A gap in the GLOBAL subscription seq drops ALL books and forces reconnect.
+
+    Scenario: seq=1 (snap A), seq=2 (snap B), then seq=4 (skips 3) — a wire-level
+    drop.  The client cannot know which ticker's book is stale, so it clears
+    everything and reconnects to get fresh snapshots.
+
+    Verified by:
+      - connect_fn is called a second time (reconnect happened)
+      - books is empty after the gap frame is received (all books cleared)
+      - the gapped frame itself is not processed (no update emitted for it)
+    """
+    snap_a = _ws_snapshot("KX-A", seq=1, yes_levels=[[0.40, 100]], no_levels=[[0.55, 200]])
+    snap_b = _ws_snapshot("KX-B", seq=2, yes_levels=[[0.50, 80]],  no_levels=[[0.45, 90]])
+    # seq=3 is skipped — seq=4 is a gap
+    gapped = _ws_snapshot("KX-A", seq=4, yes_levels=[[0.60, 50]], no_levels=[[0.35, 70]])
+
+    connect_calls = [0]
+    fake = FakeWS([snap_a, snap_b, gapped])
+
+    def fake_connect(url, additional_headers=None):
+        connect_calls[0] += 1
+        if connect_calls[0] == 1:
+            return fake
+        # Second connect (after gap reconnect): return empty WS so run loop ends
+        return FakeWS([])
+
+    updates = []
+
+    async def on_update(t, ob):
+        updates.append(t)
+
+    async def no_sleep(s):
+        pass
+
+    c = KalshiWSClient(
+        _FakeKalshi(),
+        on_book_update=on_update,
+        connect_fn=fake_connect,
+        sleep_fn=no_sleep,
+    )
+    try:
+        await asyncio.wait_for(c.run(["KX-A", "KX-B"]), timeout=2)
+    except (asyncio.CancelledError, asyncio.TimeoutError):
+        pass
+
+    # Two updates from the first two snapshots before the gap
+    assert "KX-A" in updates
+    assert "KX-B" in updates
+    # Reconnect must have been triggered (connect_fn called at least twice)
+    assert connect_calls[0] >= 2, (
+        f"Expected at least 2 connect calls (gap triggers reconnect), got {connect_calls[0]}"
+    )
+    # After the gap all books are cleared — the gapped frame is not processed
+    assert len(c.books) == 0, (
+        f"Expected all books cleared after global seq gap, got {list(c.books.keys())}"
+    )
 
 
 async def test_envelope_unwrap_updates_book():
