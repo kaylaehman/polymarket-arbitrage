@@ -26,13 +26,13 @@
 ## Reconnection / staleness / fallback (safety core)
 - The existing 30s REST sweep in `_run_kalshi_trading` is NEVER removed.
 - Health gate: WS `CONNECTED` AND `(now - last_message_ts) < ws_staleness_seconds` (default 10) ⇒ WS drives detection; REST sweep runs at a slow reconciliation cadence (default 120s) to backstop missed updates. Otherwise ⇒ REST sweep resumes full 30s cadence immediately.
-- Exactly ONE live detection path at all times; every transition logged (`[KalshiWS] -> WS primary` / `-> REST fallback (reason)`).
+- One PRIMARY detection path (WS when healthy); the REST sweep STILL SUBMITS at the reconcile cadence even when WS is primary. Cross-path duplicates are prevented ONLY by the shared `kalshi_arb_engine._opportunity_cooldown` (2s per market+type). Every mode transition is logged with a reason: `[KalshiWS] -> WS primary` / `-> REST fallback (rest:stale|rest:disconnected|rest:disabled)`.
 - Reconnect: exponential backoff (e.g. 1s→2s→…→30s cap); on (re)connect, resubscribe the current watched tickers.
 
 ## Isolation & safety
 - New config `monitoring.kalshi_ws_enabled: true` (default true once shipped; flip to false = exactly today's REST-only behavior) + `monitoring.ws_staleness_seconds: 10` + `monitoring.ws_reconcile_seconds: 120`.
 - WS client/detector fully wrapped in try/except; ANY failure logs + degrades to REST fallback — cannot crash the live arb.
-- Reuses: existing risk caps, `kalshi_execution_engine`, the liquid watched set from `_select_kalshi_arb_markets()` (WS subscribes to exactly that set; resubscribes when it refreshes), and the bundle math from the Kalshi ArbEngine/ArbConfig.
+- Reuses: existing risk caps, `kalshi_execution_engine`, the liquid watched set from `_select_kalshi_arb_markets()` (WS subscribes to exactly that set; **the watched set is static per process — selected once at startup**), and the bundle math from the Kalshi ArbEngine/ArbConfig. `KalshiWSClient.resubscribe` is used only as the internal reconnect-resubscribe mechanism.
 - Does NOT modify the execution engine, risk manager, cross-platform, or directional code.
 
 ## Testing (mock WS transport — no live socket)
