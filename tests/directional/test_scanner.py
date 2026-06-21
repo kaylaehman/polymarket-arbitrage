@@ -353,22 +353,26 @@ async def test_scan_returns_all_when_fewer_than_cap():
 
 @pytest.mark.asyncio
 async def test_scan_bounds_orderbook_probes():
-    """Orderbook probes are capped to max(60, max_markets*3) candidates."""
-    tickers = [f"KXPOL-{i}" for i in range(100)]
+    """Orderbook probes are capped to probe_limit (default 300); respects explicit override."""
+    from core.directional.scanner import DEFAULT_PROBE_LIMIT
+    tickers = [f"KXPOL-{i}" for i in range(400)]
     ob_map = {t: _ob(0.40, 0.50) for t in tickers}
     client = MockClient(
         events_pages=[_events_response(*tickers)],
         ob_map=ob_map,
     )
-    sc = KalshiMarketScanner(client, lambda t: "Politics", min_volume=0, exclude_categories=[])
+    # Use a small explicit probe_limit to verify the cap is respected.
+    sc = KalshiMarketScanner(
+        client, lambda t: "Politics", min_volume=0, exclude_categories=[], probe_limit=50
+    )
     await sc.scan(max_markets=10)
-    # max(60, 10*3) = 60 probes
-    assert len(client.ob_calls) <= 60
+    assert len(client.ob_calls) <= 50
 
 
 @pytest.mark.asyncio
-async def test_scan_probes_at_least_60_when_available():
-    """Probe limit is at least 60 regardless of max_markets."""
+async def test_scan_probes_up_to_default_probe_limit():
+    """With default probe_limit=300, scanner probes all available when universe < 300."""
+    from core.directional.scanner import DEFAULT_PROBE_LIMIT
     tickers = [f"KXPOL-{i}" for i in range(80)]
     ob_map = {t: _ob(0.40, 0.50) for t in tickers}
     client = MockClient(
@@ -377,8 +381,8 @@ async def test_scan_probes_at_least_60_when_available():
     )
     sc = KalshiMarketScanner(client, lambda t: "Politics", min_volume=0, exclude_categories=[])
     await sc.scan(max_markets=5)
-    # Even though max_markets=5, we probe up to max(60, 5*3)=60
-    assert len(client.ob_calls) == 60
+    # All 80 markets fit within the default probe_limit of 300, so all are probed.
+    assert len(client.ob_calls) == 80
 
 
 # ---------------------------------------------------------------------------
@@ -602,3 +606,74 @@ async def test_scan_max_spread_includes_wide_book_when_relaxed():
     result = await sc.scan(max_markets=10)
     assert len(result) == 1, "Wide-spread market should be included at max_spread=0.99"
     assert result[0].ticker == "KXPOL-WIDE"
+
+
+# ---------------------------------------------------------------------------
+# Scanner — near-term interleaving (_interleave_near_term)
+# ---------------------------------------------------------------------------
+
+def _market_dict_with_close(ticker, days_from_now: int):
+    """Build a raw market dict with a close_time set relative to today."""
+    from datetime import datetime, timezone, timedelta
+    ct = (datetime.now(timezone.utc) + timedelta(days=days_from_now)).isoformat()
+    d = _market_dict(ticker)
+    d["close_time"] = ct
+    return d
+
+
+def _events_response_with_close(*items, cursor=None):
+    """items is a list of (ticker, days_from_now) tuples."""
+    markets = [_market_dict_with_close(t, d) for t, d in items]
+    return {"events": [{"markets": markets, "event_ticker": "TEST"}], "cursor": cursor}
+
+
+@pytest.mark.asyncio
+async def test_interleave_promotes_near_term_before_far():
+    """Near-term markets (close within near_term_days) are probed even when
+    they appear late in the raw universe ordering and probe_limit is tight."""
+    # Universe: 5 far markets first (500d), then 1 near-term (10d) at position 6.
+    # With probe_limit=5 and NO interleaving, the near-term market would never
+    # be probed.  With interleaving it is promoted to front.
+    far_items = [(f"KXFAR-{i}", 500) for i in range(5)]
+    near_items = [("KXNEAR-1", 10)]
+    all_items = far_items + near_items
+
+    ob_map = {t: _ob(0.40, 0.50) for t, _ in all_items}
+    client = MockClient(
+        events_pages=[_events_response_with_close(*all_items)],
+        ob_map=ob_map,
+    )
+    sc = KalshiMarketScanner(
+        client,
+        lambda t: "Sports",
+        min_volume=0,
+        exclude_categories=[],
+        probe_limit=5,          # tight cap: only 5 of 6 are probed
+        near_term_days=90,
+        near_term_cap=10,
+    )
+    result = await sc.scan(max_markets=10)
+    tickers = [m.ticker for m in result]
+    # The near-term market was interleaved to front, so it should appear in results.
+    assert "KXNEAR-1" in tickers, f"Near-term market missing from results: {tickers}"
+
+
+@pytest.mark.asyncio
+async def test_interleave_far_only_when_no_near_term():
+    """When no markets are near-term, universe ordering is unchanged."""
+    far_items = [(f"KXFAR-{i}", 500) for i in range(3)]
+    ob_map = {t: _ob(0.40, 0.50) for t, _ in far_items}
+    client = MockClient(
+        events_pages=[_events_response_with_close(*far_items)],
+        ob_map=ob_map,
+    )
+    sc = KalshiMarketScanner(
+        client,
+        lambda t: "Politics",
+        min_volume=0,
+        exclude_categories=[],
+        near_term_days=30,
+    )
+    result = await sc.scan(max_markets=10)
+    # All 3 far markets should be returned (no interleave distortion)
+    assert len(result) == 3

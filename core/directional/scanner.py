@@ -6,21 +6,29 @@ set of real open binary markets that have live orderbook data.
 
 Pipeline:
 1. UNIVERSE  — fetch via /events?status=open&with_nested_markets=true, paginate
-               1-2 pages (up to ~400 events → many more markets).  Flatten nested
-               ``market`` arrays into KalshiMarket objects.  Skip parlays
-               (tickers starting with "KXMV" or containing "MULTIGAME"/"MULTIMARKET").
-               Cache the flat universe for ``cache_ttl_seconds``.
+               up to ``max_universe_pages`` pages (default 2, ~2470 markets).
+               Flatten nested ``market`` arrays into KalshiMarket objects.  Skip
+               parlays (tickers starting with "KXMV" or containing
+               "MULTIGAME"/"MULTIMARKET").  Cache the flat universe for
+               ``cache_ttl_seconds``.
 
-2. PROBE      — for each candidate (capped to max(60, max_markets*3)) call
+2. INTERLEAVE — before probing, interleave near-term markets (close_time ≤
+               ``near_term_days`` from now) at the front of the candidate list.
+               This prevents the probe cap from being dominated by whatever
+               Kalshi happens to return first (typically long-dated politics).
+               Up to ``near_term_cap`` near-term candidates are injected first;
+               the remainder are filled from the original universe ordering.
+
+3. PROBE      — for each candidate (capped to ``probe_limit``, default 200) call
                ``get_orderbook_unified(ticker)``.  KEEP only markets with a real
                two-sided YES book: ``ob.yes.best_bid`` and ``ob.yes.best_ask`` are
                both not None AND spread ≤ MAX_SPREAD.  Attach the mid-price as
                ``market.yes_price``.  Store the fetched books in ``self.last_books``
                so the engine never re-fetches them.
 
-3. CATEGORISE — tag with ``categorize_fn(event_ticker)``; drop excluded categories.
+4. CATEGORISE — tag with ``categorize_fn(event_ticker)``; drop excluded categories.
 
-4. RETURN     — up to ``max_markets`` markets, sorted by tightest YES spread first.
+5. RETURN     — up to ``max_markets`` markets, sorted by tightest YES spread first.
 
 The ``min_volume`` constructor param is accepted for backwards compatibility with
 the engine's constructor call but is otherwise unused (the /events endpoint does
@@ -30,6 +38,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional
 
 from kalshi_client.models import KalshiMarket
@@ -39,6 +48,22 @@ logger = logging.getLogger(__name__)
 # Default maximum YES spread (ask - bid) to consider a market liquid.
 # Can be overridden per-instance via the max_spread constructor parameter.
 MAX_SPREAD = 0.20
+
+# Default number of /events pages to fetch per universe refresh.
+# 2 pages × 200 events ≈ 2 400 markets — enough for good category coverage.
+DEFAULT_UNIVERSE_PAGES = 2
+
+# Default cap on orderbook probes per scan().  Set high enough to cover the
+# full 2-page universe so near-term markets are not crowded out by the probe
+# limit; the TTL cache means this only fires every cache_ttl_seconds.
+DEFAULT_PROBE_LIMIT = 300
+
+# Near-term interleaving: markets resolving within this many days are promoted
+# to the front of the candidate list so they survive the probe cap.
+DEFAULT_NEAR_TERM_DAYS = 90
+
+# Max near-term candidates injected at the front of the probe list.
+DEFAULT_NEAR_TERM_CAP = 150
 
 # Parlay ticker prefixes/substrings to exclude.
 _PARLAY_PREFIX = "KXMV"
@@ -115,6 +140,9 @@ class KalshiMarketScanner:
         cache_ttl_seconds: int = 600,
         _now_fn: Optional[Callable[[], float]] = None,
         max_spread: float = MAX_SPREAD,
+        probe_limit: int = DEFAULT_PROBE_LIMIT,
+        near_term_days: int = DEFAULT_NEAR_TERM_DAYS,
+        near_term_cap: int = DEFAULT_NEAR_TERM_CAP,
     ) -> None:
         self._client = kalshi_client
         self._categorize = categorize_fn
@@ -123,6 +151,9 @@ class KalshiMarketScanner:
         self._cache_ttl = cache_ttl_seconds
         self._now = _now_fn if _now_fn is not None else time.monotonic
         self._max_spread = max_spread
+        self._probe_limit = probe_limit
+        self._near_term_days = near_term_days
+        self._near_term_cap = near_term_cap
 
         # Universe cache (flat KalshiMarket list from /events)
         self._cached_universe: List[KalshiMarket] = []
@@ -155,12 +186,17 @@ class KalshiMarketScanner:
     # ------------------------------------------------------------------
 
     async def _fetch_universe(self) -> List[KalshiMarket]:
-        """Fetch up to 2 pages from /events and flatten nested markets."""
+        """Fetch up to DEFAULT_UNIVERSE_PAGES pages from /events and flatten.
+
+        Markets are returned in API order.  The caller (scan) applies near-term
+        interleaving so short-horizon markets are not buried behind long-dated
+        politics when the probe cap is applied.
+        """
         markets: List[KalshiMarket] = []
         seen: set = set()
         cursor: Optional[str] = None
 
-        for _page in range(2):
+        for _page in range(DEFAULT_UNIVERSE_PAGES):
             params: dict = {
                 "status": "open",
                 "with_nested_markets": "true",
@@ -193,6 +229,45 @@ class KalshiMarketScanner:
         logger.info("[scanner] Universe: %d non-parlay markets from /events", len(markets))
         return markets
 
+    def _interleave_near_term(self, universe: List[KalshiMarket]) -> List[KalshiMarket]:
+        """Promote near-term markets to the front of the candidate list.
+
+        Kalshi returns events in an internal ordering that front-loads long-dated
+        politics (2030+ elections).  Without reordering, the probe cap (even at
+        300) would exclude near-term sports/econ markets that appear later in the
+        list.  This method partitions the universe into near-term (≤ near_term_days)
+        and the rest, prepends up to near_term_cap near-term markets, then appends
+        the rest — preserving original relative ordering within each group.
+        """
+        now = datetime.now(timezone.utc)
+        threshold_days = self._near_term_days
+        near: List[KalshiMarket] = []
+        far: List[KalshiMarket] = []
+
+        for m in universe:
+            ct = getattr(m, "close_time", None)
+            if ct is not None:
+                try:
+                    days = (ct - now).days
+                    if 0 <= days <= threshold_days:
+                        near.append(m)
+                        continue
+                except Exception:
+                    pass
+            far.append(m)
+
+        near_injected = near[: self._near_term_cap]
+        remaining_near = near[self._near_term_cap :]
+        result = near_injected + far + remaining_near
+        if near_injected:
+            logger.info(
+                "[scanner] Near-term interleave: %d near-term (<=%dd) promoted to front; %d far",
+                len(near_injected),
+                threshold_days,
+                len(far),
+            )
+        return result
+
     # ------------------------------------------------------------------
     # Main scan
     # ------------------------------------------------------------------
@@ -202,10 +277,11 @@ class KalshiMarketScanner:
 
         Steps:
         1. Refresh universe from /events if cache is stale.
-        2. Probe orderbooks for up to max(60, max_markets*3) candidates.
-        3. Filter to markets with real two-sided YES books and tight spreads.
-        4. Tag category; drop excluded categories.
-        5. Sort by YES spread (tightest first) and cap to max_markets.
+        2. Interleave near-term markets to the front of the candidate list.
+        3. Probe orderbooks for up to self._probe_limit candidates.
+        4. Filter to markets with real two-sided YES books and tight spreads.
+        5. Tag category; drop excluded categories.
+        6. Sort by YES spread (tightest first) and cap to max_markets.
         """
         # 1. Universe (cached)
         now = self._now()
@@ -217,10 +293,12 @@ class KalshiMarketScanner:
             self._cached_universe = await self._fetch_universe()
             self._fetched_at = now
 
-        # 2. Probe orderbooks — clear stale books
+        # 2. Interleave near-term markets to the front before applying the probe cap.
+        ordered = self._interleave_near_term(self._cached_universe)
+
+        # 3. Probe orderbooks — clear stale books
         self.last_books = {}
-        probe_limit = max(60, max_markets * 3)
-        candidates = self._cached_universe[:probe_limit]
+        candidates = ordered[: self._probe_limit]
 
         liquid: List[KalshiMarket] = []
         for market in candidates:
@@ -250,7 +328,7 @@ class KalshiMarketScanner:
             self.last_books[market.ticker] = ob
             liquid.append(market)
 
-        # 3-4. Categorise and drop excluded categories
+        # 4-5. Categorise and drop excluded categories
         result: List[KalshiMarket] = []
         for market in liquid:
             category = self._categorize(market.event_ticker)
@@ -259,7 +337,7 @@ class KalshiMarketScanner:
             market.category = category
             result.append(market)
 
-        # 5. Sort tightest spread first, cap
+        # 6. Sort tightest spread first, cap
         def _spread(m: KalshiMarket) -> float:
             ob = self.last_books.get(m.ticker)
             if ob is None:
@@ -275,7 +353,7 @@ class KalshiMarketScanner:
 
         result.sort(key=_spread)
 
-        # 6. Optional catalyst stable-sort: bring higher-proximity markets first.
+        # 7. Optional catalyst stable-sort: bring higher-proximity markets first.
         # Uses Python's stable sort so equal-proximity markets retain spread order.
         if self._catalyst_enabled and self._catalyst_calendar:
             from datetime import datetime, timezone
