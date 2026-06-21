@@ -11,6 +11,11 @@ Live mode:
   3. Calls kalshi_client.place_order(...).
   4. Records a DirectionalPosition with mode="live".
 
+Maker (maker_longshot strategy):
+  Paper: records position at post_price immediately (status="open", simulated fill).
+  Live: places a resting (non-marketable) NO BUY limit; records PENDING position
+        with the returned order_id (status="pending"). Tracker polls for fill/TTL.
+
 Closing (C2 fix):
   close_position(position, price, mode) — SELLs the SAME token at own-space price.
   Paper: no API call (position marked closed by tracker).
@@ -55,6 +60,10 @@ class Executor:
         Returns:
             A DirectionalPosition on success, or None if aborted.
         """
+        # Maker longshot: paper simulates immediate fill; live places resting order.
+        if order.strategy == "maker_longshot":
+            return await self._place_maker(order, mode, stop_loss, take_profit)
+
         if mode == "paper":
             return self._record(order, mode, stop_loss, take_profit)
 
@@ -119,12 +128,57 @@ class Executor:
 
     # ──────────────────────────────────────────────────────────────────────────
 
+    async def _place_maker(
+        self,
+        order: DirectionalOrder,
+        mode: str,
+        stop_loss: Optional[float],
+        take_profit: Optional[float],
+    ) -> Optional[DirectionalPosition]:
+        """Handle maker_longshot order placement.
+
+        Paper: record position as immediately open at post_price (simulated fill).
+        Live:  balance-check, place resting NO BUY limit, record PENDING with order_id.
+        """
+        if mode == "paper":
+            return self._record(order, mode, stop_loss, take_profit, status="open")
+
+        # Live: pre-flight balance guard
+        bal = await self._client.get_balance()
+        if bal < order.notional:
+            logger.warning(
+                "Maker live order aborted: balance %.2f < notional %.2f for %s",
+                bal,
+                order.notional,
+                order.market_id,
+            )
+            return None
+
+        token_type = TokenType.NO  # maker_longshot is always NO BUY
+        try:
+            placed = await self._client.place_order(
+                ticker=order.market_id,
+                token_type=token_type,
+                side=OrderSide.BUY,
+                price=order.price,
+                size=order.size,
+                strategy_tag=order.strategy,
+            )
+        except Exception as exc:
+            logger.error("maker place_order failed for %s: %s", order.market_id, exc)
+            return None
+
+        order_id = getattr(placed, "order_id", None)
+        return self._record(order, mode, stop_loss, take_profit, status="pending", order_id=order_id)
+
     def _record(
         self,
         order: DirectionalOrder,
         mode: str,
         stop_loss: Optional[float],
         take_profit: Optional[float],
+        status: str = "open",
+        order_id: Optional[str] = None,
     ) -> DirectionalPosition:
         pos = DirectionalPosition(
             market_id=order.market_id,
@@ -137,7 +191,9 @@ class Executor:
             stop_loss=stop_loss,
             take_profit=take_profit,
             notional=order.notional,
-            status="open",
+            status=status,
+            order_id=order_id,
         )
         self._store.record_position(pos)
         return pos
+
