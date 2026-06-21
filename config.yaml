@@ -249,3 +249,11 @@ directional:
     max_hold_hours: 72.0
     max_days_to_resolution: 45    # skip markets closing more than 45 days out (avoids wasted Claude/NewsAPI calls)
     categories: []                # restrict to these categories; empty = no restriction (e.g. [Politics, Finance])
+
+  maker_longshot:
+    mode: paper                   # paper | live (paper until positive expectancy validated)
+    min_structural_score: 0.02    # minimum structural_score(yes_mid, "NO", category) to emit
+    max_yes_price: 0.15           # longshot filter: skip if yes_mid > this (NO >= 0.85)
+    price_improvement_cents: 1    # cents below no_ask to post the resting NO BUY limit
+    order_ttl_minutes: 60.0       # cancel unfilled live orders older than this
+    skip_categories: []           # e.g. [Sports, Entertainment]

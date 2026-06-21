@@ -59,3 +59,27 @@ async def test_live_aborts_on_insufficient_balance():
     )
     assert pos is None
     assert cl.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_executor_live_no_order_id_does_not_record_pending():
+    """I2 fix: if place_order returns no usable order_id, executor logs error and returns None.
+
+    An unmanaged pending position (no order_id) would leak on the exchange and count
+    against exposure forever. The executor must not record it.
+    """
+    class NullOrderIdClient:
+        async def get_balance(self):
+            return 100.0
+
+        async def place_order(self, **kwargs):
+            o = type("Order", (), {"order_id": None})()
+            return o
+
+    st, cl = Store(), NullOrderIdClient()
+    pos = await Executor(cl, st).place(
+        DirectionalOrder("kalshi:KX-1", "NO", 0.93, 5, 4.65, "maker_longshot"),
+        mode="live",
+    )
+    assert pos is None, "must return None when order_id is absent"
+    assert len(st.saved) == 0, "must not record a position without order_id"

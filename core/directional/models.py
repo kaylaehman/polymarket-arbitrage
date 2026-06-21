@@ -52,3 +52,4 @@ class DirectionalPosition:
     take_profit: float | None
     notional: float = 0.0
     status: str = "open"
+    order_id: str | None = None  # live maker: resting order_id until filled/cancelled

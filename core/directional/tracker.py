@@ -22,19 +22,22 @@ Tracker class
 -------------
 ``Tracker(store, kalshi_client, executor, risk_manager)``
 
-  ``async sweep(now: datetime)``:
+  ``async sweep(now: datetime, max_hold_hours, order_ttl_minutes)``:
     1. For AI-directional positions ONLY: fetch current price; call should_exit.
        On exit: paper → mark closed; live (kill switch NOT triggered) →
        call executor.close_position(position, price, mode="live") then mark closed.
-    2. For ALL positions: if market resolved → settle at 1.0 (YES) / 0.0
+    2. For ALL open positions: if market resolved → settle at 1.0 (YES) / 0.0
        (NO), mark closed, record realized P&L.  Resolution settlement
        proceeds even when kill switch is triggered.
+    3. For PENDING maker positions (maker_longshot, live only):
+       - poll get_order(order_id); on FILLED → mark status="open"
+       - if age > order_ttl_minutes and still pending → cancel_order + mark closed
 
 Kill-switch gate: when mode=="live" and risk_manager.state.kill_switch_triggered,
 skip placing live closing orders; resolution settlement still allowed.
 
-Safe Compounder positions are NOT in _AI_STRATEGIES — they are held to resolution
-only (no stop-loss/take-profit/max-hold sweeping).
+Safe Compounder and Maker Longshot positions are NOT in _AI_STRATEGIES — they
+are held to resolution only (no stop-loss/take-profit/max-hold sweeping).
 """
 
 from __future__ import annotations
@@ -44,6 +47,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from core.directional.models import DirectionalPosition
+from polymarket_client.models import OrderStatus
 
 logger = logging.getLogger(__name__)
 
@@ -107,13 +111,14 @@ class Tracker:
         self,
         now: Optional[datetime] = None,
         max_hold_hours: float = _DEFAULT_MAX_HOLD_HOURS,
+        order_ttl_minutes: float = 60.0,
     ) -> None:
-        """Check all open positions and close those that meet exit criteria."""
+        """Check all open and pending positions and apply exit rules."""
         if now is None:
             now = datetime.now(timezone.utc)
 
+        # Sweep open positions (resolution + AI exit logic)
         positions = self._store.open_positions()
-
         for pos in positions:
             closed = await self._check_resolution(pos)
             if closed:
@@ -121,6 +126,11 @@ class Tracker:
 
             if pos.strategy in _AI_STRATEGIES:
                 await self._check_exit(pos, now, max_hold_hours)
+
+        # Sweep pending maker positions (poll fill status / TTL cancel)
+        pending = self._store.pending_positions()
+        for pos in pending:
+            await self._check_pending_maker(pos, now, order_ttl_minutes)
 
     # ──────────────────────────────────────────────────────────────────────────
 
@@ -218,3 +228,54 @@ class Tracker:
             # Fall back to best bid as a conservative estimate.
             mid = token_ob.best_bid
         return mid
+
+    async def _check_pending_maker(
+        self,
+        pos: DirectionalPosition,
+        now: datetime,
+        order_ttl_minutes: float,
+    ) -> None:
+        """Poll fill status for a pending live maker order; advance or cancel it.
+
+        - FILLED / PARTIALLY_FILLED (full) → mark status="open" (hold to resolution).
+        - Age > order_ttl_minutes and still unfilled → cancel_order + mark closed.
+        - No order_id → skip (paper pending positions should not reach this path).
+        """
+        if pos.order_id is None:
+            return
+
+        try:
+            result = await self._client.get_order(pos.order_id)
+        except Exception as exc:
+            logger.debug("get_order failed for %s: %s", pos.order_id, exc)
+            return
+
+        status = result.get("status") if isinstance(result, dict) else getattr(result, "status", None)
+
+        # On fill: promote to open (will then be resolved via _check_resolution)
+        if status in (OrderStatus.FILLED,):
+            self._store.update_position(pos.market_id, status="open")
+            logger.info("Maker order filled: %s → open", pos.market_id)
+            return
+
+        # Check TTL
+        now_naive = now.replace(tzinfo=None) if now.tzinfo is not None else now
+        opened_naive = (
+            pos.opened_at.replace(tzinfo=None)
+            if pos.opened_at.tzinfo is not None
+            else pos.opened_at
+        )
+        age_minutes = (now_naive - opened_naive).total_seconds() / 60.0
+
+        if age_minutes > order_ttl_minutes:
+            try:
+                await self._client.cancel_order(pos.order_id)
+                logger.info("Maker TTL expired: cancelled %s", pos.order_id)
+            except Exception as exc:
+                logger.warning("cancel_order failed for %s: %s", pos.order_id, exc)
+            self._store.update_position(
+                pos.market_id,
+                status="closed",
+                realized_pnl=0.0,
+                closed_at=now.isoformat(),
+            )

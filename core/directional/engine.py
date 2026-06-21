@@ -20,6 +20,7 @@ from core.directional.executor import Executor
 from core.directional.scanner import KalshiMarketScanner
 from core.directional.store import DirectionalStore
 from core.directional.strategies.ai_directional import AiDirectional
+from core.directional.strategies.maker_longshot import MakerLongshotStrategy
 from core.directional.strategies.safe_compounder import SafeCompounder
 from core.directional.tracker import Tracker
 from utils.kalshi_categories import categorize
@@ -85,6 +86,17 @@ class DirectionalEngine:
                 ), ai_cfg)
             )
 
+        ml_cfg = getattr(config, "maker_longshot", None)
+        if ml_cfg is not None:
+            self._strategies.append(
+                (MakerLongshotStrategy(
+                    min_structural_score=ml_cfg.min_structural_score,
+                    max_yes_price=ml_cfg.max_yes_price,
+                    price_improvement_cents=ml_cfg.price_improvement_cents,
+                    skip_categories=list(getattr(ml_cfg, "skip_categories", [])),
+                ), ml_cfg)
+            )
+
         # Build decider (caps from config; cash balance = 100 placeholder without a live query)
         self.decider = Decider(
             risk_manager=risk_manager,
@@ -108,6 +120,8 @@ class DirectionalEngine:
 
         # Max hold hours for tracker (default 72)
         self._max_hold_hours = getattr(ai_cfg, "max_hold_hours", 72.0) if ai_cfg else 72.0
+        # Maker TTL for tracker (default 60 min)
+        self._order_ttl_minutes = getattr(ml_cfg, "order_ttl_minutes", 60.0) if ml_cfg else 60.0
 
     def _get_cash_balance(self) -> float:
         """Synchronous placeholder returning a fixed balance for Kelly sizing."""
@@ -135,8 +149,8 @@ class DirectionalEngine:
 
         for strategy, strat_cfg in self._strategies:
             # Build per-strategy context
-            if strategy.name == "safe_compounder":
-                ctx = sc_ctx
+            if strategy.name in ("safe_compounder", "maker_longshot"):
+                ctx = sc_ctx  # both NO-side strategies use no_ask from scanner books
             else:
                 ctx = {}  # AiDirectional needs no extra ctx
 
@@ -167,7 +181,11 @@ class DirectionalEngine:
                 mode = strat_cfg.mode
                 await self.executor.place(order, mode=mode, stop_loss=stop_loss, take_profit=take_profit)
 
-        await self.tracker.sweep(now=datetime.now(timezone.utc), max_hold_hours=self._max_hold_hours)
+        await self.tracker.sweep(
+            now=datetime.now(timezone.utc),
+            max_hold_hours=self._max_hold_hours,
+            order_ttl_minutes=self._order_ttl_minutes,
+        )
 
     async def run_forever(self) -> None:
         """Loop run_once every scan_interval_seconds; catches all exceptions."""
