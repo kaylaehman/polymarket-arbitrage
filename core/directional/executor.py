@@ -169,6 +169,13 @@ class Executor:
             return None
 
         order_id = getattr(placed, "order_id", None)
+        if not order_id:
+            logger.error(
+                "maker place_order returned no order_id for %s; "
+                "not recording to avoid unmanaged pending position",
+                order.market_id,
+            )
+            return None
         return self._record(order, mode, stop_loss, take_profit, status="pending", order_id=order_id)
 
     def _record(
