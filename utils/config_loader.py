@@ -234,6 +234,17 @@ class AiDirectionalCfg:
 
 
 @dataclass
+class MakerLongshotCfg:
+    """Config for the Maker Longshot (NO-bias resting limit) strategy."""
+    mode: str = "paper"                 # "paper" | "live"
+    min_structural_score: float = 0.02  # minimum structural_score to emit a candidate
+    max_yes_price: float = 0.15         # longshot filter: skip if yes_mid > this
+    price_improvement_cents: int = 1    # cents below no_ask to post the resting limit
+    order_ttl_minutes: float = 60.0     # cancel unfilled live orders older than this
+    skip_categories: list = field(default_factory=list)
+
+
+@dataclass
 class DirectionalConfig:
     """Directional trading mode config. Disabled by default (additive)."""
     enabled: bool = False
@@ -247,6 +258,7 @@ class DirectionalConfig:
     caps: DirectionalCaps = field(default_factory=DirectionalCaps)
     safe_compounder: SafeCompounderCfg = field(default_factory=SafeCompounderCfg)
     ai_directional: AiDirectionalCfg = field(default_factory=AiDirectionalCfg)
+    maker_longshot: MakerLongshotCfg = field(default_factory=MakerLongshotCfg)
 
 
 @dataclass
@@ -393,8 +405,9 @@ def _build_directional(data: dict) -> DirectionalConfig:
     caps = _build_dataclass(DirectionalCaps, data.get("caps", {}) or {})
     safe_compounder = _build_dataclass(SafeCompounderCfg, data.get("safe_compounder", {}) or {})
     ai_directional = _build_dataclass(AiDirectionalCfg, data.get("ai_directional", {}) or {})
-    top = {k: v for k, v in data.items() if k not in ("caps", "safe_compounder", "ai_directional")}
-    return _build_dataclass(DirectionalConfig, {**top, "caps": caps, "safe_compounder": safe_compounder, "ai_directional": ai_directional})
+    maker_longshot = _build_dataclass(MakerLongshotCfg, data.get("maker_longshot", {}) or {})
+    top = {k: v for k, v in data.items() if k not in ("caps", "safe_compounder", "ai_directional", "maker_longshot")}
+    return _build_dataclass(DirectionalConfig, {**top, "caps": caps, "safe_compounder": safe_compounder, "ai_directional": ai_directional, "maker_longshot": maker_longshot})
 
 
 def _validate_config(config: BotConfig) -> None:
@@ -441,6 +454,10 @@ def _validate_config(config: BotConfig) -> None:
     if d.safe_compounder.mode not in _valid_modes:
         errors.append(
             f"directional.safe_compounder.mode must be 'paper' or 'live', got '{d.safe_compounder.mode}'"
+        )
+    if d.maker_longshot.mode not in _valid_modes:
+        errors.append(
+            f"directional.maker_longshot.mode must be 'paper' or 'live', got '{d.maker_longshot.mode}'"
         )
     # M4: caps must be positive.
     if d.caps.max_position <= 0:

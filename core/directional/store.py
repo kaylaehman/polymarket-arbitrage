@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS directional_positions (
     take_profit REAL,
     notional REAL NOT NULL DEFAULT 0.0,
     status TEXT NOT NULL DEFAULT 'open',
+    order_id TEXT,
     realized_pnl REAL,
     closed_at TIMESTAMP,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -106,8 +107,8 @@ class DirectionalStore:
         cur = self._conn.execute(
             """INSERT INTO directional_positions
                (market_id, side, entry_price, size, strategy, mode, opened_at,
-                stop_loss, take_profit, notional, status)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                stop_loss, take_profit, notional, status, order_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 position.market_id,
                 position.side,
@@ -120,6 +121,7 @@ class DirectionalStore:
                 position.take_profit,
                 position.notional,
                 position.status,
+                position.order_id,
             ),
         )
         self._conn.commit()
@@ -149,6 +151,13 @@ class DirectionalStore:
         ).fetchall()
         return [_row_to_position(r) for r in rows]
 
+    def pending_positions(self) -> list:
+        """Return all pending maker DirectionalPosition objects (awaiting fill)."""
+        rows = self._conn.execute(
+            "SELECT * FROM directional_positions WHERE status = 'pending' ORDER BY id"
+        ).fetchall()
+        return [_row_to_position(r) for r in rows]
+
     def recent_signals(self, limit: int = 50) -> list:
         """Return the most recent signal dicts."""
         rows = self._conn.execute(
@@ -157,9 +166,9 @@ class DirectionalStore:
         return [dict(r) for r in rows]
 
     def directional_exposure(self) -> float:
-        """Sum of notional across all open positions."""
+        """Sum of notional across all open and pending positions."""
         row = self._conn.execute(
-            "SELECT COALESCE(SUM(notional), 0.0) FROM directional_positions WHERE status = 'open'"
+            "SELECT COALESCE(SUM(notional), 0.0) FROM directional_positions WHERE status IN ('open', 'pending')"
         ).fetchone()
         return float(row[0])
 
@@ -203,4 +212,5 @@ def _row_to_position(row: sqlite3.Row) -> DirectionalPosition:
         take_profit=row["take_profit"],
         notional=row["notional"],
         status=row["status"],
+        order_id=row["order_id"] if "order_id" in row.keys() else None,
     )
