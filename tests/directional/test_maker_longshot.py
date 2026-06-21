@@ -43,6 +43,7 @@ def make_market(
     no_price=0.92,
     category="Politics",
     title="Test market",
+    close_time=None,
 ):
     m = SimpleNamespace()
     m.ticker = ticker
@@ -53,6 +54,7 @@ def make_market(
     m.title = title
     m.status = "open"
     m.result = None
+    m.close_time = close_time
     m.to_unified_market_id = lambda: f"kalshi:{ticker}"
     return m
 
@@ -63,6 +65,7 @@ def default_strategy(**overrides):
         max_yes_price=0.15,
         price_improvement_cents=1,
         skip_categories=[],
+        max_days_to_resolution=9999.0,  # disabled in unit tests; tested separately
     )
     kwargs.update(overrides)
     return MakerLongshotStrategy(**kwargs)
@@ -83,7 +86,8 @@ async def test_strategy_emits_no_candidate_on_longshot():
     default min_structural_score=0.02 comfortably.
     """
     strategy = default_strategy(min_structural_score=0.02)
-    market = make_market(yes_price=0.08, category="Sports")
+    near_term = datetime.now(timezone.utc) + timedelta(days=30)
+    market = make_market(yes_price=0.08, category="Sports", close_time=near_term)
     candidates = await strategy.scan([market], make_ctx(no_ask=0.94))
 
     assert len(candidates) == 1
@@ -99,7 +103,8 @@ async def test_strategy_emits_no_candidate_on_longshot():
 async def test_post_price_strictly_below_no_ask():
     """post_price must be strictly < no_ask so the order rests in the book."""
     strategy = default_strategy(price_improvement_cents=1)
-    market = make_market(yes_price=0.08, category="Sports")
+    near_term = datetime.now(timezone.utc) + timedelta(days=30)
+    market = make_market(yes_price=0.08, category="Sports", close_time=near_term)
     no_ask = 0.94
     candidates = await strategy.scan([market], make_ctx(no_ask=no_ask))
 
@@ -151,8 +156,10 @@ async def test_emits_within_band():
         price_improvement_cents=1,
         skip_categories=[],
         min_yes_price=0.05,
+        max_days_to_resolution=9999.0,
     )
-    market = make_market(yes_price=0.08, category="Sports")
+    near_term = datetime.now(timezone.utc) + timedelta(days=30)
+    market = make_market(yes_price=0.08, category="Sports", close_time=near_term)
     candidates = await strategy.scan([market], make_ctx(no_ask=0.94))
     assert len(candidates) == 1
     assert candidates[0].side == "NO"
@@ -216,7 +223,8 @@ async def test_post_price_safety_below_no_ask_after_clamp():
 async def test_candidate_fields_populated():
     """DirectionalCandidate has correct market_id, category, reasoning."""
     strategy = default_strategy(min_structural_score=0.02)
-    market = make_market(ticker="KX-SAMPLE", yes_price=0.10, category="Sports")
+    near_term = datetime.now(timezone.utc) + timedelta(days=30)
+    market = make_market(ticker="KX-SAMPLE", yes_price=0.10, category="Sports", close_time=near_term)
     candidates = await strategy.scan([market], make_ctx(no_ask=0.92))
 
     assert len(candidates) == 1
@@ -499,6 +507,43 @@ async def test_tracker_maker_resolves_settles_pnl(tmp_path):
     assert abs(summary["total_realized_pnl"] - 0.35) < 1e-6
 
 
+
+@pytest.mark.asyncio
+async def test_skips_long_dated_market():
+    """A market resolving in 400 days with max_days_to_resolution=90 → no candidate."""
+    strategy = MakerLongshotStrategy(
+        min_structural_score=0.02,
+        max_yes_price=0.15,
+        price_improvement_cents=1,
+        skip_categories=[],
+        min_yes_price=0.05,
+        max_days_to_resolution=90.0,
+    )
+    far_future = datetime.now(timezone.utc) + timedelta(days=400)
+    market = make_market(yes_price=0.08, category="Sports", close_time=far_future)
+    candidates = await strategy.scan([market], make_ctx(no_ask=0.94))
+    assert candidates == [], f"Expected no candidates for 400-day market, got {candidates}"
+
+
+@pytest.mark.asyncio
+async def test_emits_near_term_market():
+    """A qualifying longshot resolving in 30 days (within 90-day cap) → emits candidate."""
+    strategy = MakerLongshotStrategy(
+        min_structural_score=0.02,
+        max_yes_price=0.15,
+        price_improvement_cents=1,
+        skip_categories=[],
+        min_yes_price=0.05,
+        max_days_to_resolution=90.0,
+    )
+    near_term = datetime.now(timezone.utc) + timedelta(days=30)
+    market = make_market(yes_price=0.08, category="Sports", close_time=near_term)
+    candidates = await strategy.scan([market], make_ctx(no_ask=0.94))
+    assert len(candidates) == 1, f"Expected 1 candidate for 30-day market, got {candidates}"
+    assert candidates[0].side == "NO"
+    assert candidates[0].strategy == "maker_longshot"
+
+
 # ── Config tests ──────────────────────────────────────────────────────────────
 
 def test_maker_longshot_config_defaults():
@@ -512,6 +557,7 @@ def test_maker_longshot_config_defaults():
     assert cfg.price_improvement_cents == 1
     assert cfg.order_ttl_minutes == 60.0
     assert cfg.skip_categories == []
+    assert cfg.max_days_to_resolution == 90.0
 
 
 def test_directional_config_has_maker_longshot():
@@ -597,6 +643,7 @@ def make_engine_config(sc_min_edge=3, ml_max_yes=0.15, ml_min_score=0.02):
         price_improvement_cents=1,
         order_ttl_minutes=60.0,
         skip_categories=[],
+        max_days_to_resolution=9999.0,
     )
     caps = SimpleNamespace(total_exposure=30.0, max_position=8.0, max_open=4)
     return SimpleNamespace(
@@ -619,6 +666,12 @@ class FakeKalshiClientEngine:
         self.place_order_calls = []
 
     async def _get(self, endpoint, params=None):
+        def _serialize_close_time(m):
+            ct = getattr(m, "close_time", None)
+            if ct is None:
+                return None
+            return ct.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+
         nested = [
             {
                 "ticker": m.ticker,
@@ -626,7 +679,7 @@ class FakeKalshiClientEngine:
                 "series_ticker": getattr(m, "series_ticker", m.ticker),
                 "title": m.title,
                 "status": "open",
-                "close_time": None,
+                "close_time": _serialize_close_time(m),
             }
             for m in self._markets
         ]
@@ -696,7 +749,8 @@ async def test_engine_run_once_paper_records_maker_position():
 
     cfg = make_engine_config(sc_min_edge=999, ml_min_score=0.02, ml_max_yes=0.15)
     # Longshot NFL (Sports) market: yes=0.08 → structural_score(0.92, NO, Sports) ≈ 0.10 > 0.02
-    market = make_market(ticker="KXNFL-25JAN15-TBD", yes_price=0.08, category="Sports")
+    near_term = datetime.now(timezone.utc) + timedelta(days=30)
+    market = make_market(ticker="KXNFL-25JAN15-TBD", yes_price=0.08, category="Sports", close_time=near_term)
     market.event_ticker = "KXNFL-25JAN15"
     market.series_ticker = "KXNFL"
     client = FakeKalshiClientEngine(markets=[market], no_ask=0.94)

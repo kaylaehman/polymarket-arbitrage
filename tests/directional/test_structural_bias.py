@@ -1,3 +1,4 @@
+from datetime import datetime, timezone, timedelta
 import pytest
 from utils.structural_bias import structural_score
 
@@ -34,6 +35,7 @@ async def test_structural_score_corrected_strategy_emits_at_default_threshold():
     from core.directional.strategies.maker_longshot import MakerLongshotStrategy
     from types import SimpleNamespace
 
+    near_term = datetime.now(timezone.utc) + timedelta(days=30)
     market = SimpleNamespace(
         ticker="KX-SPORTS-LS",
         yes_price=0.08,
@@ -42,6 +44,7 @@ async def test_structural_score_corrected_strategy_emits_at_default_threshold():
         title="Longshot sports market",
         status="open",
         result=None,
+        close_time=near_term,
     )
     market.to_unified_market_id = lambda: "kalshi:KX-SPORTS-LS"
 
@@ -50,6 +53,7 @@ async def test_structural_score_corrected_strategy_emits_at_default_threshold():
         max_yes_price=0.15,
         price_improvement_cents=1,
         skip_categories=[],
+        max_days_to_resolution=9999.0,
     )
     ctx = {"no_ask": lambda ticker: 0.94}
     candidates = await strategy.scan([market], ctx)
@@ -63,6 +67,7 @@ async def test_structural_score_corrected_strategy_emits_sports_not_above_high_t
     from core.directional.strategies.maker_longshot import MakerLongshotStrategy
     from types import SimpleNamespace
 
+    near_term = datetime.now(timezone.utc) + timedelta(days=30)
     market = SimpleNamespace(
         ticker="KX-SPORTS-LS2",
         yes_price=0.08,
@@ -71,6 +76,7 @@ async def test_structural_score_corrected_strategy_emits_sports_not_above_high_t
         title="Longshot sports market 2",
         status="open",
         result=None,
+        close_time=near_term,
     )
     market.to_unified_market_id = lambda: "kalshi:KX-SPORTS-LS2"
 
@@ -80,6 +86,7 @@ async def test_structural_score_corrected_strategy_emits_sports_not_above_high_t
         max_yes_price=0.15,
         price_improvement_cents=1,
         skip_categories=[],
+        max_days_to_resolution=9999.0,
     )
     ctx = {"no_ask": lambda ticker: 0.94}
     candidates = await strategy.scan([market], ctx)

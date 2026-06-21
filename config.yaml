@@ -258,6 +258,7 @@ directional:
     price_improvement_cents: 1    # cents below no_ask to post the resting NO BUY limit
     order_ttl_minutes: 60.0       # cancel unfilled live orders older than this
     skip_categories: []           # e.g. [Sports, Entertainment]
+    max_days_to_resolution: 90    # only post on longshots resolving within N days (so paper P&L actually accrues)
 
 
 # ── Alerts ────────────────────────────────────────────────────────────────────

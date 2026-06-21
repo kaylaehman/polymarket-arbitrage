@@ -243,6 +243,7 @@ class MakerLongshotCfg:
     price_improvement_cents: int = 1    # cents below no_ask to post the resting limit
     order_ttl_minutes: float = 60.0     # cancel unfilled live orders older than this
     skip_categories: list = field(default_factory=list)
+    max_days_to_resolution: float = 90.0  # only post on longshots resolving within N days
 
 
 @dataclass

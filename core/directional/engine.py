@@ -95,6 +95,7 @@ class DirectionalEngine:
                     max_yes_price=ml_cfg.max_yes_price,
                     price_improvement_cents=ml_cfg.price_improvement_cents,
                     skip_categories=list(getattr(ml_cfg, "skip_categories", [])),
+                    max_days_to_resolution=getattr(ml_cfg, "max_days_to_resolution", 90.0),
                 ), ml_cfg)
             )
 

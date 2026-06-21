@@ -17,6 +17,7 @@ Resting maker price:
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 from core.directional.models import DirectionalCandidate
@@ -35,6 +36,9 @@ class MakerLongshotStrategy(Strategy):
         max_yes_price: Skip markets where yes_mid > this (longshot filter).
         price_improvement_cents: How many cents below no_ask to post the bid.
         skip_categories: Category strings to skip entirely.
+        max_days_to_resolution: Skip markets whose close_time is more than this many
+            days from now (or in the past). Markets with no close_time are skipped
+            to be safe.
     """
 
     def __init__(
@@ -44,12 +48,14 @@ class MakerLongshotStrategy(Strategy):
         price_improvement_cents: int,
         skip_categories: list[str],
         min_yes_price: float = 0.05,
+        max_days_to_resolution: float = 90.0,
     ) -> None:
         self._min_score = min_structural_score
         self._min_yes = min_yes_price
         self._max_yes = max_yes_price
         self._pip = price_improvement_cents
         self._skip = set(skip_categories)
+        self._max_days = max_days_to_resolution
 
     @property
     def name(self) -> str:
@@ -76,6 +82,15 @@ class MakerLongshotStrategy(Strategy):
 
         for market in markets:
             if market.category in self._skip:
+                continue
+
+            close = market.close_time
+            if close is None:
+                continue
+            if close.tzinfo is None:
+                close = close.replace(tzinfo=timezone.utc)
+            delta_days = (close - datetime.now(timezone.utc)).total_seconds() / 86400.0
+            if delta_days <= 0 or delta_days > self._max_days:
                 continue
 
             yes_mid = market.yes_price
