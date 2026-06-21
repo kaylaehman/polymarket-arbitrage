@@ -254,11 +254,11 @@ directional:
     mode: paper                   # paper | live (paper until positive expectancy validated)
     min_structural_score: 0.02    # minimum structural_score(yes_mid, "NO", category) to emit
     min_yes_price: 0.05           # floor on yes_mid -> skip NO > 0.95 (avoid fat-tail extremes)
-    max_yes_price: 0.15           # longshot filter: skip if yes_mid > this (NO >= 0.85)
+    max_yes_price: 0.20           # longshot filter: loosened from 0.15; NO band [0.80, 0.95]
     price_improvement_cents: 1    # cents below no_ask to post the resting NO BUY limit
     order_ttl_minutes: 60.0       # cancel unfilled live orders older than this
     skip_categories: []           # e.g. [Sports, Entertainment]
-    max_days_to_resolution: 90    # only post on longshots resolving within N days (so paper P&L actually accrues)
+    max_days_to_resolution: 30    # near-term focus: tightened from 90 to 30 days
 
 
 # ── Alerts ────────────────────────────────────────────────────────────────────

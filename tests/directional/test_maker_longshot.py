@@ -547,17 +547,17 @@ async def test_emits_near_term_market():
 # ── Config tests ──────────────────────────────────────────────────────────────
 
 def test_maker_longshot_config_defaults():
-    """MakerLongshotCfg has expected defaults."""
+    """MakerLongshotCfg has expected defaults (loosened: max_yes_price=0.20, max_days=30)."""
     from utils.config_loader import MakerLongshotCfg
     cfg = MakerLongshotCfg()
     assert cfg.mode == "paper"
     assert cfg.min_structural_score == 0.02
     assert cfg.min_yes_price == 0.05
-    assert cfg.max_yes_price == 0.15
+    assert cfg.max_yes_price == 0.20          # loosened from 0.15; NO band [0.80, 0.95]
     assert cfg.price_improvement_cents == 1
     assert cfg.order_ttl_minutes == 60.0
     assert cfg.skip_categories == []
-    assert cfg.max_days_to_resolution == 90.0
+    assert cfg.max_days_to_resolution == 30.0  # tightened from 90 to focus on near-term
 
 
 def test_directional_config_has_maker_longshot():
@@ -566,7 +566,7 @@ def test_directional_config_has_maker_longshot():
     cfg = DirectionalConfig()
     assert hasattr(cfg, "maker_longshot")
     assert cfg.maker_longshot.mode == "paper"
-    assert cfg.maker_longshot.max_yes_price == 0.15
+    assert cfg.maker_longshot.max_yes_price == 0.20  # loosened from 0.15
 
 
 def test_maker_longshot_mode_typo_raises_config_error(tmp_path):
