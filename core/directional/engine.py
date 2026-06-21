@@ -149,15 +149,27 @@ class DirectionalEngine:
         # SafeCompounder context — no_ask reads from scanner.last_books (no re-fetch)
         sc_ctx = self._build_sc_ctx()
 
+        # MakerLongshotStrategy needs the full pre-cap liquid universe so that
+        # near-term longshots (e.g. KXCABLEAVE-26MAY22-26JUL at index 114) are not
+        # silently dropped by the spread-sort → cap(15) applied to the general list.
+        # scanner.last_liquid holds all liquid+categorized markets before the cap;
+        # no additional API calls are needed since last_books is already populated.
+        maker_markets = self.scanner.last_liquid if self.scanner.last_liquid else markets
+
         for strategy, strat_cfg in self._strategies:
-            # Build per-strategy context
-            if strategy.name in ("safe_compounder", "maker_longshot"):
-                ctx = sc_ctx  # both NO-side strategies use no_ask from scanner books
+            # Build per-strategy context and market list
+            if strategy.name == "maker_longshot":
+                ctx = sc_ctx
+                strategy_markets = maker_markets
+            elif strategy.name == "safe_compounder":
+                ctx = sc_ctx
+                strategy_markets = markets
             else:
                 ctx = {}  # AiDirectional needs no extra ctx
+                strategy_markets = markets
 
             try:
-                candidates = await strategy.scan(markets, ctx)
+                candidates = await strategy.scan(strategy_markets, ctx)
             except Exception as exc:
                 logger.warning("[%s] scan error: %s", strategy.name, exc)
                 continue

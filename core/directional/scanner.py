@@ -162,6 +162,12 @@ class KalshiMarketScanner:
         # Per-scan orderbook results (cleared and repopulated each scan)
         self.last_books: Dict[str, object] = {}  # ticker → OrderBook
 
+        # All liquid+categorized markets from the most recent scan, before the
+        # max_markets cap.  Strategies that need to evaluate a broader universe
+        # (e.g. MakerLongshotStrategy on near-term longshots) read from here
+        # directly, paying no extra API cost since last_books is already populated.
+        self.last_liquid: List[KalshiMarket] = []
+
         # Catalyst targeting (gated; default off)
         self._catalyst_enabled: bool = False
         self._catalyst_calendar: list = []
@@ -296,8 +302,9 @@ class KalshiMarketScanner:
         # 2. Interleave near-term markets to the front before applying the probe cap.
         ordered = self._interleave_near_term(self._cached_universe)
 
-        # 3. Probe orderbooks — clear stale books
+        # 3. Probe orderbooks — clear stale books and pre-cap cache
         self.last_books = {}
+        self.last_liquid = []
         candidates = ordered[: self._probe_limit]
 
         liquid: List[KalshiMarket] = []
@@ -337,7 +344,10 @@ class KalshiMarketScanner:
             market.category = category
             result.append(market)
 
-        # 6. Sort tightest spread first, cap
+        # 6. Persist all liquid markets before capping (strategies may need the full set)
+        self.last_liquid = list(result)
+
+        # 7. Sort tightest spread first, cap
         def _spread(m: KalshiMarket) -> float:
             ob = self.last_books.get(m.ticker)
             if ob is None:
@@ -353,7 +363,7 @@ class KalshiMarketScanner:
 
         result.sort(key=_spread)
 
-        # 7. Optional catalyst stable-sort: bring higher-proximity markets first.
+        # 8. Optional catalyst stable-sort: bring higher-proximity markets first.
         # Uses Python's stable sort so equal-proximity markets retain spread order.
         if self._catalyst_enabled and self._catalyst_calendar:
             from datetime import datetime, timezone

@@ -677,3 +677,119 @@ async def test_interleave_far_only_when_no_near_term():
     result = await sc.scan(max_markets=10)
     # All 3 far markets should be returned (no interleave distortion)
     assert len(result) == 3
+
+
+# ---------------------------------------------------------------------------
+# Scanner — last_liquid exposes full pre-cap liquid universe
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_last_liquid_contains_all_liquid_markets_before_cap():
+    """scanner.last_liquid holds every liquid+categorized market regardless of max_markets cap.
+
+    Regression test for the KXCABLEAVE-26MAY22-26JUL bug: near-term longshots
+    at index 114 in the spread-sorted list were silently dropped by cap(15),
+    making them invisible to MakerLongshotStrategy.  last_liquid exposes the
+    full pre-cap set so the maker can evaluate all qualifying candidates.
+    """
+    tickers = [f"KXPOL-{i}" for i in range(20)]
+    ob_map = {t: _ob(0.40, 0.50) for t in tickers}
+    client = MockClient(
+        events_pages=[_events_response(*tickers)],
+        ob_map=ob_map,
+    )
+    sc = KalshiMarketScanner(client, lambda t: "Politics", min_volume=0, exclude_categories=[])
+    result = await sc.scan(max_markets=5)
+
+    assert len(result) == 5, "Capped result should have 5 markets"
+    assert len(sc.last_liquid) == 20, (
+        f"last_liquid should have all 20 liquid markets; got {len(sc.last_liquid)}"
+    )
+    # Every ticker that passed liquidity must be in last_liquid
+    liquid_tickers = {m.ticker for m in sc.last_liquid}
+    for t in tickers:
+        assert t in liquid_tickers
+
+
+@pytest.mark.asyncio
+async def test_last_liquid_cleared_between_scans():
+    """last_liquid is reset on each scan() call."""
+    client = MockClient(
+        events_pages=[
+            _events_response("KXPOL-1", "KXPOL-2"),
+            _events_response("KXPOL-3"),
+        ],
+        ob_map={
+            "KXPOL-1": _ob(0.40, 0.50),
+            "KXPOL-2": _ob(0.40, 0.50),
+            "KXPOL-3": _ob(0.40, 0.50),
+        },
+    )
+    t = [0.0]
+    sc = KalshiMarketScanner(
+        client,
+        lambda _: "Politics",
+        min_volume=0,
+        exclude_categories=[],
+        cache_ttl_seconds=600,
+        _now_fn=lambda: t[0],
+    )
+    await sc.scan(max_markets=1)
+    assert len(sc.last_liquid) == 2  # both markets probed
+
+    # Force cache invalidation so second scan re-fetches the universe
+    t[0] = 601.0
+    await sc.scan(max_markets=1)
+    # second scan sees only KXPOL-3; last_liquid should reflect new scan
+    liquid_tickers = {m.ticker for m in sc.last_liquid}
+    assert "KXPOL-3" in liquid_tickers
+    assert "KXPOL-1" not in liquid_tickers
+
+
+@pytest.mark.asyncio
+async def test_near_term_longshot_in_last_liquid_but_not_capped_result():
+    """Reproduces the core KXCABLEAVE scenario:
+    a near-term longshot (yes≈0.075, spread=0.05) lands at a high index in the
+    spread-sorted list and is excluded by the cap, yet IS present in last_liquid.
+    """
+    from datetime import datetime, timezone, timedelta
+    # 19 markets with tight spreads (0.02) that will rank above the longshot
+    tight_items = [(f"KXTIGHT-{i}", 500) for i in range(19)]
+    # 1 near-term longshot with a wider spread (0.05) — correct analogue for KXCABLEAVE
+    longshot_item = ("KXNEAR-LONGSHOT", 10)  # 10 days out
+
+    all_items = tight_items + [longshot_item]
+
+    ob_map = {}
+    for t, _ in tight_items:
+        ob_map[t] = _ob(0.49, 0.51, no_ask=0.52)    # spread 0.02, yes_mid≈0.50
+    ob_map["KXNEAR-LONGSHOT"] = _ob(0.05, 0.10, no_ask=0.95)  # spread 0.05, yes_mid=0.075
+
+    client = MockClient(
+        events_pages=[_events_response_with_close(*all_items)],
+        ob_map=ob_map,
+    )
+    sc = KalshiMarketScanner(
+        client,
+        lambda t: "Sports",
+        min_volume=0,
+        exclude_categories=[],
+        near_term_days=90,
+        near_term_cap=50,
+        probe_limit=300,
+    )
+
+    result = await sc.scan(max_markets=15)  # same as production markets_per_cycle
+
+    result_tickers = {m.ticker for m in result}
+    liquid_tickers = {m.ticker for m in sc.last_liquid}
+
+    # The near-term longshot should NOT be in the 15-market capped list (spread=0.05
+    # is beaten by 19 tight markets with spread=0.02)
+    assert "KXNEAR-LONGSHOT" not in result_tickers, (
+        "Longshot unexpectedly survived the tight cap — test precondition broken"
+    )
+    # But it MUST be in last_liquid so the maker strategy can evaluate it
+    assert "KXNEAR-LONGSHOT" in liquid_tickers, (
+        "Near-term longshot missing from last_liquid — maker strategy would miss it"
+    )

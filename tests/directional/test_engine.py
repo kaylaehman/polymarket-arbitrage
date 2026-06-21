@@ -236,3 +236,105 @@ async def test_run_forever_survives_exception():
     engine._running = True
     await engine.run_forever()
     assert call_count >= 3, "run_forever should keep running after exception"
+
+
+@pytest.mark.asyncio
+async def test_engine_maker_uses_last_liquid_not_capped_list():
+    """Regression test: MakerLongshotStrategy receives scanner.last_liquid (full pre-cap
+    set) so near-term longshots at high spread-sort indexes are not silently dropped.
+
+    Setup: 20 markets where 19 have tight spreads (beat KXNEAR-LONGSHOT in sort).
+    With markets_per_cycle=15, scan(15) excludes KXNEAR-LONGSHOT.
+    The engine must still route the longshot to the maker via last_liquid.
+    """
+    from datetime import datetime, timezone, timedelta
+    from core.directional.engine import DirectionalEngine
+
+    # Shared close_time builder
+    def make_close(days):
+        return datetime.now(timezone.utc) + timedelta(days=days)
+
+    # 19 tight-spread far markets that monopolise the top-15 capped list
+    tight_markets = []
+    for i in range(19):
+        m = make_market(ticker=f"KXTIGHT-{i:02d}", yes_price=0.50)
+        m.event_ticker = f"KXTIGHT-{i:02d}"
+        m.close_time = make_close(500)
+        tight_markets.append(m)
+
+    # 1 near-term longshot: yes=0.08, spread wider than tight markets
+    longshot = make_market(ticker="KXNEAR-LONGSHOT", yes_price=0.08)
+    longshot.event_ticker = "KXNEAR-LONGSHOT"
+    longshot.close_time = make_close(10)
+    longshot.category = "Sports"
+
+    all_markets = tight_markets + [longshot]
+
+    # FakeKalshiClient extended to return per-market orderbooks with correct spreads
+    class ExtendedFakeClient(FakeKalshiClient):
+        def __init__(self, markets, longshot_ticker, longshot_no_ask=0.94):
+            super().__init__(markets, no_ask=0.52)
+            self._longshot = longshot_ticker
+            self._longshot_no_ask = longshot_no_ask
+
+        async def _get(self, endpoint, params=None):
+            # serialize close_time for the scanner
+            def _ct(m):
+                ct = getattr(m, "close_time", None)
+                return ct.strftime("%Y-%m-%dT%H:%M:%S+00:00") if ct else None
+
+            nested = [
+                {
+                    "ticker": m.ticker,
+                    "event_ticker": getattr(m, "event_ticker", m.ticker),
+                    "series_ticker": getattr(m, "series_ticker", m.ticker),
+                    "title": m.title,
+                    "status": "open",
+                    "close_time": _ct(m),
+                }
+                for m in self._markets
+            ]
+            return {"events": [{"markets": nested, "event_ticker": "FAKE"}], "cursor": None}
+
+        async def get_orderbook_unified(self, ticker):
+            from types import SimpleNamespace
+            ob = SimpleNamespace()
+            if ticker == self._longshot:
+                # wider spread = 0.05; yes_mid=0.075 → yes band [0.05, 0.20]
+                yes = SimpleNamespace(best_bid=0.05, best_ask=0.10)
+                no = SimpleNamespace(best_ask=self._longshot_no_ask, best_bid=self._longshot_no_ask - 0.01)
+            else:
+                # tight spread = 0.02; yes_mid=0.50 → outside longshot band
+                yes = SimpleNamespace(best_bid=0.49, best_ask=0.51)
+                no = SimpleNamespace(best_ask=0.52, best_bid=0.51)
+            ob.yes = yes
+            ob.no = no
+            return ob
+
+    client = ExtendedFakeClient(all_markets, "KXNEAR-LONGSHOT", longshot_no_ask=0.94)
+
+    # Config: markets_per_cycle=15 (production default), maker enabled
+    ml = SimpleNamespace(
+        mode="paper",
+        min_structural_score=0.02,
+        min_yes_price=0.05,
+        max_yes_price=0.20,
+        price_improvement_cents=1,
+        order_ttl_minutes=60.0,
+        skip_categories=[],
+        max_days_to_resolution=30.0,
+    )
+    cfg = make_config()
+    cfg.markets_per_cycle = 15
+    cfg.maker_longshot = ml
+
+    engine = DirectionalEngine(cfg, client, FakeIntelligenceEngine(), FakeRiskManager())
+    await engine.run_once()
+
+    positions = engine.store.open_positions()
+    maker_positions = [p for p in positions if p.strategy == "maker_longshot"]
+    assert len(maker_positions) >= 1, (
+        f"Expected at least 1 maker_longshot position for near-term longshot; "
+        f"got positions: {[(p.strategy, p.market_id) for p in positions]}"
+    )
+    assert maker_positions[0].market_id == "kalshi:KXNEAR-LONGSHOT"
