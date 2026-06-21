@@ -257,3 +257,37 @@ directional:
     price_improvement_cents: 1    # cents below no_ask to post the resting NO BUY limit
     order_ttl_minutes: 60.0       # cancel unfilled live orders older than this
     skip_categories: []           # e.g. [Sports, Entertainment]
+
+
+# ── Alerts ────────────────────────────────────────────────────────────────────
+# Push trade/kill-switch/position events to Discord and/or Telegram.
+# Disabled by default — zero behavior change unless you set enabled: true.
+# Secrets (webhook URL / tokens) go in .env (gitignored), NOT here:
+#   ALERT_DISCORD_WEBHOOK=https://discord.com/api/webhooks/...
+#   ALERT_TELEGRAM_BOT_TOKEN=123456:ABC...
+#   ALERT_TELEGRAM_CHAT_ID=-100123456789
+alerts:
+  enabled: false                  # Set true to activate
+  cooldown_seconds: 60.0          # Min seconds between same (event_type, market) alerts
+  min_severity: "info"            # Minimum severity to send: info | warn | critical
+
+
+# ── Catalyst Targeting ────────────────────────────────────────────────────────
+# Prioritise markets near scheduled economic/political catalysts in the scanner.
+# Disabled by default — zero behavior change unless enabled: true.
+# Edit the calendar list below to match upcoming events.
+catalyst:
+  enabled: false
+  window_hours: 72.0              # Look ahead this many hours for catalyst proximity
+  # User-editable calendar. Each entry: name, date (ISO 8601), keywords (list).
+  # The keywords are case-insensitive substrings matched against market title/category.
+  calendar:
+    # - name: "FOMC Meeting"
+    #   date: "2026-07-29T14:00:00"
+    #   keywords: ["FOMC", "federal reserve", "rate", "interest rate"]
+    # - name: "CPI Release"
+    #   date: "2026-07-15T08:30:00"
+    #   keywords: ["CPI", "inflation", "consumer price"]
+    # - name: "Jobs Report"
+    #   date: "2026-08-07T08:30:00"
+    #   keywords: ["jobs", "nonfarm payroll", "employment", "unemployment"]

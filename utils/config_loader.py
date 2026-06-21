@@ -262,6 +262,27 @@ class DirectionalConfig:
 
 
 @dataclass
+class AlertsConfig:
+    """Push-notification alerts config. Disabled by default (additive).
+
+    Secrets (webhook URL / tokens) are read from environment variables at
+    startup — never put them in config.yaml.
+    """
+    enabled: bool = False
+    cooldown_seconds: float = 60.0
+    min_severity: str = "info"
+
+
+@dataclass
+class CatalystConfig:
+    """Catalyst-calendar targeting config. Disabled by default (additive)."""
+    enabled: bool = False
+    window_hours: float = 72.0
+    # User-editable list of upcoming catalysts. Each entry: {name, date (ISO str), keywords: [...]}
+    calendar: list = field(default_factory=list)
+
+
+@dataclass
 class BotConfig:
     """Complete bot configuration."""
     api: ApiConfig = field(default_factory=ApiConfig)
@@ -274,6 +295,8 @@ class BotConfig:
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
     directional: DirectionalConfig = field(default_factory=DirectionalConfig)
+    alerts: AlertsConfig = field(default_factory=AlertsConfig)
+    catalyst: CatalystConfig = field(default_factory=CatalystConfig)
     
     @property
     def is_dry_run(self) -> bool:
@@ -357,6 +380,8 @@ def load_config(config_path: str = "config.yaml") -> BotConfig:
         database=_build_dataclass(DatabaseConfig, database_data),
         agent=_build_dataclass(AgentConfig, raw_config.get("agent", {}) or {}),
         directional=_build_directional(raw_config.get("directional", {}) or {}),
+        alerts=_build_dataclass(AlertsConfig, raw_config.get("alerts", {}) or {}),
+        catalyst=_build_catalyst(raw_config.get("catalyst", {}) or {}),
     )
     
     # Validate
@@ -408,6 +433,15 @@ def _build_directional(data: dict) -> DirectionalConfig:
     maker_longshot = _build_dataclass(MakerLongshotCfg, data.get("maker_longshot", {}) or {})
     top = {k: v for k, v in data.items() if k not in ("caps", "safe_compounder", "ai_directional", "maker_longshot")}
     return _build_dataclass(DirectionalConfig, {**top, "caps": caps, "safe_compounder": safe_compounder, "ai_directional": ai_directional, "maker_longshot": maker_longshot})
+
+
+def _build_catalyst(data: dict) -> "CatalystConfig":
+    """Build CatalystConfig from raw YAML dict.
+
+    The ``calendar`` list is passed through as-is; missing block falls back to
+    defaults (enabled=False).
+    """
+    return _build_dataclass(CatalystConfig, data)
 
 
 def _validate_config(config: BotConfig) -> None:
