@@ -238,6 +238,7 @@ class MakerLongshotCfg:
     """Config for the Maker Longshot (NO-bias resting limit) strategy."""
     mode: str = "paper"                 # "paper" | "live"
     min_structural_score: float = 0.02  # minimum structural_score to emit a candidate
+    min_yes_price: float = 0.05         # floor on yes_mid -> skip NO > 0.95 (avoid fat-tail extremes)
     max_yes_price: float = 0.15         # longshot filter: skip if yes_mid > this
     price_improvement_cents: int = 1    # cents below no_ask to post the resting limit
     order_ttl_minutes: float = 60.0     # cancel unfilled live orders older than this

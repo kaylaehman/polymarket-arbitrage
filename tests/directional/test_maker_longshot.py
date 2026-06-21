@@ -128,6 +128,37 @@ async def test_skips_when_yes_mid_exactly_at_zero():
 
 
 @pytest.mark.asyncio
+async def test_skips_when_yes_mid_below_min():
+    """yes_mid < min_yes_price (NO > 0.95) -> fat-tail extreme, skip."""
+    strategy = MakerLongshotStrategy(
+        min_structural_score=0.02,
+        max_yes_price=0.15,
+        price_improvement_cents=1,
+        skip_categories=[],
+        min_yes_price=0.05,
+    )
+    market = make_market(yes_price=0.02)  # NO@0.98 > 0.95 threshold
+    candidates = await strategy.scan([market], make_ctx(no_ask=0.99))
+    assert candidates == []
+
+
+@pytest.mark.asyncio
+async def test_emits_within_band():
+    """yes_mid=0.08 with min=0.05 / max=0.15 -> within band, emits candidate."""
+    strategy = MakerLongshotStrategy(
+        min_structural_score=0.02,
+        max_yes_price=0.15,
+        price_improvement_cents=1,
+        skip_categories=[],
+        min_yes_price=0.05,
+    )
+    market = make_market(yes_price=0.08, category="Sports")
+    candidates = await strategy.scan([market], make_ctx(no_ask=0.94))
+    assert len(candidates) == 1
+    assert candidates[0].side == "NO"
+
+
+@pytest.mark.asyncio
 async def test_skips_when_score_below_min():
     """structural_score below threshold → skip."""
     # yes_mid=0.50 → score near 0 (near-zero longshot/NO bias at 50¢)
@@ -476,6 +507,7 @@ def test_maker_longshot_config_defaults():
     cfg = MakerLongshotCfg()
     assert cfg.mode == "paper"
     assert cfg.min_structural_score == 0.02
+    assert cfg.min_yes_price == 0.05
     assert cfg.max_yes_price == 0.15
     assert cfg.price_improvement_cents == 1
     assert cfg.order_ttl_minutes == 60.0
@@ -560,6 +592,7 @@ def make_engine_config(sc_min_edge=3, ml_max_yes=0.15, ml_min_score=0.02):
     ml = SimpleNamespace(
         mode="paper",
         min_structural_score=ml_min_score,
+        min_yes_price=0.05,
         max_yes_price=ml_max_yes,
         price_improvement_cents=1,
         order_ttl_minutes=60.0,

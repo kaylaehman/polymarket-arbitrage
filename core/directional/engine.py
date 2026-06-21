@@ -91,6 +91,7 @@ class DirectionalEngine:
             self._strategies.append(
                 (MakerLongshotStrategy(
                     min_structural_score=ml_cfg.min_structural_score,
+                    min_yes_price=ml_cfg.min_yes_price,
                     max_yes_price=ml_cfg.max_yes_price,
                     price_improvement_cents=ml_cfg.price_improvement_cents,
                     skip_categories=list(getattr(ml_cfg, "skip_categories", [])),

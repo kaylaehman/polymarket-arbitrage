@@ -30,6 +30,8 @@ class MakerLongshotStrategy(Strategy):
 
     Args:
         min_structural_score: Minimum structural_score(1 - yes_mid, "NO", category).
+        min_yes_price: Skip markets where yes_mid < this (fat-tail floor;
+            default 0.05 = NO > 0.95 rejected).
         max_yes_price: Skip markets where yes_mid > this (longshot filter).
         price_improvement_cents: How many cents below no_ask to post the bid.
         skip_categories: Category strings to skip entirely.
@@ -41,8 +43,10 @@ class MakerLongshotStrategy(Strategy):
         max_yes_price: float,
         price_improvement_cents: int,
         skip_categories: list[str],
+        min_yes_price: float = 0.05,
     ) -> None:
         self._min_score = min_structural_score
+        self._min_yes = min_yes_price
         self._max_yes = max_yes_price
         self._pip = price_improvement_cents
         self._skip = set(skip_categories)
@@ -60,7 +64,8 @@ class MakerLongshotStrategy(Strategy):
 
         For each market:
         1. Skip excluded categories.
-        2. Skip if yes_mid <= 0 or > max_yes_price (not a longshot).
+        2. Skip if yes_mid <= 0, < min_yes_price, or > max_yes_price
+           (accepted band: min_yes_price <= yes_mid <= max_yes_price).
         3. Compute structural_score(1 - yes_mid, "NO", category); skip if < min.
         4. Fetch no_ask; skip if unavailable.
         5. Build resting post_price strictly below no_ask.
@@ -74,7 +79,7 @@ class MakerLongshotStrategy(Strategy):
                 continue
 
             yes_mid = market.yes_price
-            if yes_mid <= 0 or yes_mid > self._max_yes:
+            if yes_mid <= 0 or yes_mid < self._min_yes or yes_mid > self._max_yes:
                 continue
 
             score = structural_score(1 - yes_mid, "NO", market.category)
