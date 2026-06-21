@@ -338,3 +338,213 @@ async def test_engine_maker_uses_last_liquid_not_capped_list():
         f"got positions: {[(p.strategy, p.market_id) for p in positions]}"
     )
     assert maker_positions[0].market_id == "kalshi:KXNEAR-LONGSHOT"
+
+
+# ── Dedup tests ──────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_run_once_skips_duplicate_market_same_strategy():
+    """run_once must NOT create a second position when the store already holds an
+    open maker_longshot position for that market_id.
+
+    Regression guard for the bug where every scan cycle stacked a new identical
+    position for KXCABLEAVE-26MAY22-26JUL until the $30 total-exposure cap hit.
+    """
+    from datetime import datetime, timezone, timedelta
+    from core.directional.engine import DirectionalEngine
+    from core.directional.models import DirectionalPosition
+
+    # Market that already has an open maker_longshot position in the store
+    DUP_TICKER = "KXCABLEAVE-26MAY22-26JUL"
+    DUP_MARKET_ID = f"kalshi:{DUP_TICKER}"
+
+    # Fresh market that has NO prior position — should still be placed
+    NEW_TICKER = "KXNEWMARKET-FRESH"
+    NEW_MARKET_ID = f"kalshi:{NEW_TICKER}"
+
+    def make_close(days):
+        return datetime.now(timezone.utc) + timedelta(days=days)
+
+    dup_market = make_market(ticker=DUP_TICKER, yes_price=0.06)
+    dup_market.event_ticker = DUP_TICKER
+    dup_market.close_time = make_close(35)
+
+    new_market = make_market(ticker=NEW_TICKER, yes_price=0.07)
+    new_market.event_ticker = NEW_TICKER
+    new_market.close_time = make_close(20)
+
+    all_markets = [dup_market, new_market]
+
+    class DedupeTestClient(FakeKalshiClient):
+        async def _get(self, endpoint, params=None):
+            def _ct(m):
+                ct = getattr(m, "close_time", None)
+                return ct.strftime("%Y-%m-%dT%H:%M:%S+00:00") if ct else None
+
+            nested = [
+                {
+                    "ticker": m.ticker,
+                    "event_ticker": getattr(m, "event_ticker", m.ticker),
+                    "series_ticker": getattr(m, "series_ticker", m.ticker),
+                    "title": m.title,
+                    "status": "open",
+                    "close_time": _ct(m),
+                }
+                for m in self._markets
+            ]
+            return {"events": [{"markets": nested, "event_ticker": "FAKE"}], "cursor": None}
+
+        async def get_orderbook_unified(self, ticker):
+            ob = SimpleNamespace()
+            # Both markets qualify as maker_longshot candidates
+            yes = SimpleNamespace(best_bid=0.05, best_ask=0.09)
+            no = SimpleNamespace(best_ask=0.94, best_bid=0.93)
+            ob.yes = yes
+            ob.no = no
+            return ob
+
+    client = DedupeTestClient(all_markets, no_ask=0.94)
+
+    ml = SimpleNamespace(
+        mode="paper",
+        min_structural_score=0.02,
+        min_yes_price=0.05,
+        max_yes_price=0.20,
+        price_improvement_cents=1,
+        order_ttl_minutes=60.0,
+        skip_categories=[],
+        max_days_to_resolution=60.0,
+    )
+    cfg = make_config()
+    cfg.maker_longshot = ml
+    # Disable other strategies to isolate maker_longshot behaviour
+    cfg.safe_compounder = None
+    cfg.ai_directional = None
+
+    engine = DirectionalEngine(cfg, client, FakeIntelligenceEngine(), FakeRiskManager())
+
+    # Pre-seed the store with an existing open maker_longshot position for DUP_TICKER
+    existing = DirectionalPosition(
+        market_id=DUP_MARKET_ID,
+        side="NO",
+        entry_price=0.94,
+        size=8,
+        strategy="maker_longshot",
+        mode="paper",
+        opened_at=datetime.now(timezone.utc),
+        stop_loss=None,
+        take_profit=None,
+        notional=7.52,
+        status="open",
+        order_id=None,
+    )
+    engine.store.record_position(existing)
+
+    # Run one scan cycle
+    await engine.run_once()
+
+    open_positions = engine.store.open_positions()
+
+    # Count positions per market_id
+    dup_positions = [p for p in open_positions if p.market_id == DUP_MARKET_ID]
+    new_positions = [p for p in open_positions if p.market_id == NEW_MARKET_ID]
+
+    assert len(dup_positions) == 1, (
+        f"Expected exactly 1 position for {DUP_MARKET_ID} (dedup must prevent stacking); "
+        f"got {len(dup_positions)}"
+    )
+    assert len(new_positions) >= 1, (
+        f"Expected at least 1 position for fresh market {NEW_MARKET_ID} (dedup must not block new markets); "
+        f"got {len(new_positions)}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_once_skips_pending_market_same_strategy():
+    """run_once must also skip a market that has a PENDING (not just open) position."""
+    from datetime import datetime, timezone, timedelta
+    from core.directional.engine import DirectionalEngine
+    from core.directional.models import DirectionalPosition
+
+    PENDING_TICKER = "KXPENDING-MARKET"
+    PENDING_MARKET_ID = f"kalshi:{PENDING_TICKER}"
+
+    def make_close(days):
+        return datetime.now(timezone.utc) + timedelta(days=days)
+
+    pending_market = make_market(ticker=PENDING_TICKER, yes_price=0.06)
+    pending_market.event_ticker = PENDING_TICKER
+    pending_market.close_time = make_close(25)
+
+    class PendingDedupeClient(FakeKalshiClient):
+        async def _get(self, endpoint, params=None):
+            def _ct(m):
+                ct = getattr(m, "close_time", None)
+                return ct.strftime("%Y-%m-%dT%H:%M:%S+00:00") if ct else None
+
+            nested = [
+                {
+                    "ticker": m.ticker,
+                    "event_ticker": getattr(m, "event_ticker", m.ticker),
+                    "series_ticker": getattr(m, "series_ticker", m.ticker),
+                    "title": m.title,
+                    "status": "open",
+                    "close_time": _ct(m),
+                }
+                for m in self._markets
+            ]
+            return {"events": [{"markets": nested, "event_ticker": "FAKE"}], "cursor": None}
+
+        async def get_orderbook_unified(self, ticker):
+            ob = SimpleNamespace()
+            yes = SimpleNamespace(best_bid=0.05, best_ask=0.09)
+            no = SimpleNamespace(best_ask=0.94, best_bid=0.93)
+            ob.yes = yes
+            ob.no = no
+            return ob
+
+    client = PendingDedupeClient([pending_market], no_ask=0.94)
+
+    ml = SimpleNamespace(
+        mode="paper",
+        min_structural_score=0.02,
+        min_yes_price=0.05,
+        max_yes_price=0.20,
+        price_improvement_cents=1,
+        order_ttl_minutes=60.0,
+        skip_categories=[],
+        max_days_to_resolution=60.0,
+    )
+    cfg = make_config()
+    cfg.maker_longshot = ml
+    cfg.safe_compounder = None
+    cfg.ai_directional = None
+
+    engine = DirectionalEngine(cfg, client, FakeIntelligenceEngine(), FakeRiskManager())
+
+    # Pre-seed with a PENDING position (live maker, awaiting fill)
+    pending_pos = DirectionalPosition(
+        market_id=PENDING_MARKET_ID,
+        side="NO",
+        entry_price=0.94,
+        size=8,
+        strategy="maker_longshot",
+        mode="live",
+        opened_at=datetime.now(timezone.utc),
+        stop_loss=None,
+        take_profit=None,
+        notional=7.52,
+        status="pending",
+        order_id="test-order-123",
+    )
+    engine.store.record_position(pending_pos)
+
+    await engine.run_once()
+
+    # Only the pre-seeded pending position should exist; no new open position
+    all_active = engine.store.open_positions() + engine.store.pending_positions()
+    for_market = [p for p in all_active if p.market_id == PENDING_MARKET_ID]
+    assert len(for_market) == 1, (
+        f"Expected exactly 1 active position for {PENDING_MARKET_ID} (pending dedup); "
+        f"got {len(for_market)}: {[(p.status, p.market_id) for p in for_market]}"
+    )

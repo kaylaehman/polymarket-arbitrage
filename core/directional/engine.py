@@ -156,6 +156,13 @@ class DirectionalEngine:
         # no additional API calls are needed since last_books is already populated.
         maker_markets = self.scanner.last_liquid if self.scanner.last_liquid else markets
 
+        # Build per-strategy dedup sets once per cycle so repeated scans of the
+        # same market never stack duplicate open/pending positions.
+        all_active = self.store.open_positions() + self.store.pending_positions()
+        held_markets: dict[str, set[str]] = {}
+        for pos in all_active:
+            held_markets.setdefault(pos.strategy, set()).add(pos.market_id)
+
         for strategy, strat_cfg in self._strategies:
             # Build per-strategy context and market list
             if strategy.name == "maker_longshot":
@@ -174,7 +181,19 @@ class DirectionalEngine:
                 logger.warning("[%s] scan error: %s", strategy.name, exc)
                 continue
 
+            strategy_held = held_markets.get(strategy.name, set())
+
             for candidate in candidates:
+                # Dedup: skip if this strategy already holds an open/pending
+                # position for this market_id (prevents stacking duplicates).
+                if candidate.market_id in strategy_held:
+                    logger.debug(
+                        "[%s] skipping %s — already have an open/pending position",
+                        strategy.name,
+                        candidate.market_id,
+                    )
+                    continue
+
                 order = self.decider.decide(candidate)
                 if order is None:
                     self.store.record_signal(candidate, placed=False)
@@ -194,6 +213,10 @@ class DirectionalEngine:
 
                 mode = strat_cfg.mode
                 await self.executor.place(order, mode=mode, stop_loss=stop_loss, take_profit=take_profit)
+                # Track the newly placed market so subsequent candidates in this
+                # same cycle don't re-post it (handles multiple candidates for
+                # the same market within one scan batch).
+                strategy_held.add(candidate.market_id)
 
         await self.tracker.sweep(
             now=datetime.now(timezone.utc),
