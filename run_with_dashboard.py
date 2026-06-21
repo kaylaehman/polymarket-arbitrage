@@ -226,6 +226,25 @@ class TradingBotWithDashboard:
             logger.warning(f"[Intelligence] init failed, continuing without: {e}")
             self.intelligence_engine = None
 
+        # Alerts (gated; never raises into startup)
+        alerts_cfg = getattr(self.config, "alerts", None)
+        if alerts_cfg is not None and alerts_cfg.enabled:
+            try:
+                import os
+                from core.alerts import Alerter
+                from core import alerts as _alerts_mod
+                _alerter = Alerter(
+                    discord_webhook=os.getenv("ALERT_DISCORD_WEBHOOK"),
+                    telegram_bot_token=os.getenv("ALERT_TELEGRAM_BOT_TOKEN"),
+                    telegram_chat_id=os.getenv("ALERT_TELEGRAM_CHAT_ID"),
+                    cooldown_seconds=alerts_cfg.cooldown_seconds,
+                    min_severity=alerts_cfg.min_severity,
+                )
+                _alerts_mod.configure(_alerter)
+                logger.info("[Alerts] Configured (enabled=true)")
+            except Exception as _alerts_err:
+                logger.warning(f"[Alerts] init failed, continuing without: {_alerts_err}")
+
         # Directional trading engine (gated; never touches arb loop)
         directional_cfg = getattr(self.config, "directional", None)
         if directional_cfg is None:
@@ -238,6 +257,16 @@ class TradingBotWithDashboard:
                 self.intelligence_engine,
                 self.risk_manager,
             )
+            # Wire catalyst config into the directional scanner (additive, gated)
+            _cat_cfg = getattr(self.config, "catalyst", None)
+            if _cat_cfg is not None and _cat_cfg.enabled:
+                self.directional_engine.scanner._catalyst_enabled = True
+                self.directional_engine.scanner._catalyst_calendar = list(_cat_cfg.calendar or [])
+                self.directional_engine.scanner._catalyst_window_hours = _cat_cfg.window_hours
+                logger.info(
+                    f"[Catalyst] Directional scanner wired: {len(_cat_cfg.calendar or [])} "
+                    f"entries, window={_cat_cfg.window_hours}h"
+                )
             asyncio.create_task(
                 self._guarded(self.directional_engine.run_forever(), "directional")
             )
@@ -735,6 +764,12 @@ class TradingBotWithDashboard:
                 exclude_categories=[],
                 max_spread=0.99,
             )
+            # Wire catalyst config if enabled (additive, gated)
+            _cat_cfg = getattr(self.config, "catalyst", None)
+            if _cat_cfg is not None and _cat_cfg.enabled:
+                scanner._catalyst_enabled = True
+                scanner._catalyst_calendar = list(_cat_cfg.calendar or [])
+                scanner._catalyst_window_hours = _cat_cfg.window_hours
             liquid = await scanner.scan(self.config.monitoring.kalshi_max_markets)
             if liquid:
                 return liquid
@@ -842,6 +877,20 @@ class TradingBotWithDashboard:
                                 edge=signal.opportunity.edge,
                                 suggested_size=signal.opportunity.suggested_size,
                             )
+                            # Fire-and-forget bundle alert (gated; never blocks loop)
+                            try:
+                                from core import alerts as _alerts
+                                asyncio.create_task(
+                                    _alerts.notify(
+                                        "bundle",
+                                        "Bundle arb signal",
+                                        f"{signal.market_id} edge={signal.opportunity.edge:.4f}",
+                                        severity="info",
+                                        dedup_key=signal.market_id,
+                                    )
+                                )
+                            except Exception:
+                                pass
                         await self.kalshi_execution_engine.submit_signal(signal)
                 except asyncio.CancelledError:
                     raise

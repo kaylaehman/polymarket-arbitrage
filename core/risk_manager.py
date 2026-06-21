@@ -225,6 +225,24 @@ class RiskManager:
         self.state.kill_switch_triggered = True
         self.state.kill_switch_reason = reason
         logger.critical(f"KILL SWITCH TRIGGERED: {reason}")
+        # Fire-and-forget alert (gated; never raises into the caller)
+        try:
+            import asyncio
+            from core import alerts
+            if alerts._ALERTER is not None:
+                coro = alerts.notify(
+                    "kill_switch",
+                    "Kill switch triggered",
+                    reason,
+                    severity="critical",
+                    dedup_key="kill_switch",
+                )
+                try:
+                    asyncio.get_running_loop().create_task(coro)
+                except RuntimeError:
+                    asyncio.run(coro)
+        except Exception:
+            pass
     
     def trigger_kill_switch(self, reason: str = "Manual trigger") -> None:
         """Public manual kill-switch trigger (e.g. from the agent control API)."""
