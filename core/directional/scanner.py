@@ -131,6 +131,11 @@ class KalshiMarketScanner:
         # Per-scan orderbook results (cleared and repopulated each scan)
         self.last_books: Dict[str, object] = {}  # ticker → OrderBook
 
+        # Catalyst targeting (gated; default off)
+        self._catalyst_enabled: bool = False
+        self._catalyst_calendar: list = []
+        self._catalyst_window_hours: float = 72.0
+
     # ------------------------------------------------------------------
     # Public helpers consumed by the engine
     # ------------------------------------------------------------------
@@ -269,4 +274,23 @@ class KalshiMarketScanner:
             return ask - bid
 
         result.sort(key=_spread)
+
+        # 6. Optional catalyst stable-sort: bring higher-proximity markets first.
+        # Uses Python's stable sort so equal-proximity markets retain spread order.
+        if self._catalyst_enabled and self._catalyst_calendar:
+            from datetime import datetime, timezone
+            from core.catalyst import catalyst_proximity
+            now_dt = datetime.now(timezone.utc)
+
+            def _neg_proximity(m: KalshiMarket) -> float:
+                return -catalyst_proximity(
+                    m.title,
+                    m.category,
+                    now_dt,
+                    self._catalyst_calendar,
+                    self._catalyst_window_hours,
+                )
+
+            result.sort(key=_neg_proximity)
+
         return result[:max_markets]

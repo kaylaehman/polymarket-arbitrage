@@ -202,5 +202,21 @@ class Executor:
             order_id=order_id,
         )
         self._store.record_position(pos)
+        # Fire-and-forget alert (gated; never raises into the caller)
+        try:
+            import asyncio
+            from core import alerts
+            if alerts._ALERTER is not None:
+                asyncio.get_event_loop().create_task(
+                    alerts.notify(
+                        "directional_open",
+                        f"{order.strategy} {order.side} {order.market_id}",
+                        f"price={order.price} size={order.size} mode={mode}",
+                        severity="info",
+                        dedup_key=order.market_id,
+                    )
+                )
+        except Exception:
+            pass
         return pos
 
