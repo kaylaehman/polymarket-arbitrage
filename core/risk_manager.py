@@ -230,15 +230,17 @@ class RiskManager:
             import asyncio
             from core import alerts
             if alerts._ALERTER is not None:
-                asyncio.get_event_loop().create_task(
-                    alerts.notify(
-                        "kill_switch",
-                        "Kill switch triggered",
-                        reason,
-                        severity="critical",
-                        dedup_key="kill_switch",
-                    )
+                coro = alerts.notify(
+                    "kill_switch",
+                    "Kill switch triggered",
+                    reason,
+                    severity="critical",
+                    dedup_key="kill_switch",
                 )
+                try:
+                    asyncio.get_running_loop().create_task(coro)
+                except RuntimeError:
+                    asyncio.run(coro)
         except Exception:
             pass
     

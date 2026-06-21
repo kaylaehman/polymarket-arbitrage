@@ -406,3 +406,226 @@ async def test_position_open_no_notify_when_disabled(monkeypatch):
     await asyncio.sleep(0)
 
     assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# PART B-1 (C1 regression): _trigger_kill_switch fires with NO running event loop
+# ---------------------------------------------------------------------------
+
+def test_kill_switch_fires_notify_without_running_loop(monkeypatch):
+    """_trigger_kill_switch dispatches alert even when called from a plain sync context
+    (no running event loop).  asyncio.run() fallback must invoke notify."""
+    from core.risk_manager import RiskManager, RiskConfig
+
+    calls = []
+
+    async def fake_notify(event_type, title, body, severity="info", dedup_key=""):
+        calls.append((event_type, severity))
+
+    monkeypatch.setattr(alerts_module, "_ALERTER", MagicMock())
+    monkeypatch.setattr(alerts_module, "notify", fake_notify)
+
+    rm = RiskManager(RiskConfig())
+    # Called from a plain sync function — no running loop.
+    rm._trigger_kill_switch("sync-context trigger")
+
+    assert any(e == "kill_switch" for e, _ in calls), (
+        f"notify not called from sync context: {calls}"
+    )
+    assert any(s == "critical" for _, s in calls)
+
+
+def test_record_fires_notify_without_running_loop(monkeypatch):
+    """Executor._record dispatches alert from a plain sync context via asyncio.run()."""
+    from core.directional.executor import Executor
+    from core.directional.models import DirectionalOrder
+
+    calls = []
+
+    async def fake_notify(event_type, title, body, severity="info", dedup_key=""):
+        calls.append((event_type, dedup_key))
+
+    class Store:
+        def record_position(self, p): pass
+
+    monkeypatch.setattr(alerts_module, "_ALERTER", MagicMock())
+    monkeypatch.setattr(alerts_module, "notify", fake_notify)
+
+    store = Store()
+    ex = Executor(None, store)
+    order = DirectionalOrder("mkt-sync", "YES", 0.5, 3, 1.5, "safe_compounder")
+    ex._record(order, "paper", None, None)
+
+    assert any(e == "directional_open" for e, _ in calls), (
+        f"notify not called from sync context: {calls}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# PART B-2: Critical alerts bypass cooldown
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_critical_bypasses_cooldown():
+    """Two critical sends within the cooldown window both go through."""
+    clock = [0.0]
+    alerter = _make_alerter(
+        discord="https://discord.test/hook",
+        cooldown=3600.0,
+        now_fn=lambda: clock[0],
+    )
+
+    mock_response = MagicMock()
+    mock_response.raise_for_status = MagicMock()
+
+    with patch("httpx.AsyncClient") as mock_cls:
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_cls.return_value = mock_client
+
+        r1 = await alerter.send("kill_switch", "KS", "first", severity="critical", dedup_key="ks")
+        clock[0] = 1.0  # well within cooldown
+        r2 = await alerter.send("kill_switch", "KS", "second", severity="critical", dedup_key="ks")
+
+    assert "discord" in r1, "first critical send should fire"
+    assert "discord" in r2, "second critical within cooldown must also fire"
+    assert mock_client.post.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# PART B-3: Non-critical repeat within cooldown is suppressed
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_non_critical_repeat_suppressed_within_cooldown():
+    """A second info send for the same key within the cooldown window is dropped."""
+    clock = [0.0]
+    alerter = _make_alerter(
+        discord="https://discord.test/hook",
+        cooldown=60.0,
+        now_fn=lambda: clock[0],
+    )
+
+    mock_response = MagicMock()
+    mock_response.raise_for_status = MagicMock()
+
+    with patch("httpx.AsyncClient") as mock_cls:
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_cls.return_value = mock_client
+
+        r1 = await alerter.send("some_event", "T", "B", severity="info", dedup_key="x")
+        clock[0] = 30.0
+        r2 = await alerter.send("some_event", "T", "B", severity="info", dedup_key="x")
+
+    assert "discord" in r1
+    assert r2 == [], "non-critical within cooldown must be suppressed"
+    assert mock_client.post.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# PART B-4: min_severity gates non-critical; critical always passes
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_min_severity_gates_below_threshold_non_critical():
+    """A debug alert is dropped when min_severity is 'warning'."""
+    alerter = Alerter(
+        discord_webhook="https://discord.test/hook",
+        telegram_bot_token=None,
+        telegram_chat_id=None,
+        cooldown_seconds=0.0,
+        min_severity="warning",
+    )
+
+    with patch("httpx.AsyncClient") as mock_cls:
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.post = AsyncMock(return_value=MagicMock(raise_for_status=MagicMock()))
+        mock_cls.return_value = mock_client
+
+        result = await alerter.send("evt", "T", "B", severity="debug")
+
+    assert result == [], "debug below warning threshold should be dropped"
+    mock_client.post.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_min_severity_does_not_gate_critical():
+    """A critical alert sends even when min_severity is set to 'critical' or higher."""
+    alerter = Alerter(
+        discord_webhook="https://discord.test/hook",
+        telegram_bot_token=None,
+        telegram_chat_id=None,
+        cooldown_seconds=3600.0,
+        min_severity="warning",
+    )
+
+    mock_response = MagicMock()
+    mock_response.raise_for_status = MagicMock()
+
+    with patch("httpx.AsyncClient") as mock_cls:
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_cls.return_value = mock_client
+
+        result = await alerter.send("kill_switch", "KS", "body", severity="critical")
+
+    assert "discord" in result, "critical must not be blocked by min_severity"
+    mock_client.post.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# PART B-5: Hook safety — caller unaffected when notify raises synchronously
+# ---------------------------------------------------------------------------
+
+def test_kill_switch_caller_unaffected_when_notify_raises(monkeypatch):
+    """If notify raises synchronously (e.g. asyncio.run re-raises), _trigger_kill_switch
+    must still return normally and the kill-switch state must be set."""
+    from core.risk_manager import RiskManager, RiskConfig
+
+    async def bad_notify(*a, **kw):
+        raise RuntimeError("simulated notify failure")
+
+    monkeypatch.setattr(alerts_module, "_ALERTER", MagicMock())
+    monkeypatch.setattr(alerts_module, "notify", bad_notify)
+
+    rm = RiskManager(RiskConfig())
+    # Must not raise, even though notify blows up.
+    rm._trigger_kill_switch("test failure isolation")
+
+    assert rm.state.kill_switch_triggered is True
+    assert rm.state.kill_switch_reason == "test failure isolation"
+
+
+def test_record_caller_unaffected_when_notify_raises(monkeypatch):
+    """If notify raises inside _record, the position is still recorded and _record returns."""
+    from core.directional.executor import Executor
+    from core.directional.models import DirectionalOrder
+
+    async def bad_notify(*a, **kw):
+        raise RuntimeError("simulated notify failure")
+
+    recorded = []
+
+    class Store:
+        def record_position(self, p):
+            recorded.append(p)
+
+    monkeypatch.setattr(alerts_module, "_ALERTER", MagicMock())
+    monkeypatch.setattr(alerts_module, "notify", bad_notify)
+
+    store = Store()
+    ex = Executor(None, store)
+    order = DirectionalOrder("mkt-safe", "YES", 0.4, 5, 2.0, "safe_compounder")
+    pos = ex._record(order, "paper", None, None)
+
+    assert pos is not None, "_record must return position even when notify raises"
+    assert len(recorded) == 1, "position must still be recorded"

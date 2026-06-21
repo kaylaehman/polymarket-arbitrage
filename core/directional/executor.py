@@ -207,15 +207,17 @@ class Executor:
             import asyncio
             from core import alerts
             if alerts._ALERTER is not None:
-                asyncio.get_event_loop().create_task(
-                    alerts.notify(
-                        "directional_open",
-                        f"{order.strategy} {order.side} {order.market_id}",
-                        f"price={order.price} size={order.size} mode={mode}",
-                        severity="info",
-                        dedup_key=order.market_id,
-                    )
+                coro = alerts.notify(
+                    "directional_open",
+                    f"{order.strategy} {order.side} {order.market_id}",
+                    f"price={order.price} size={order.size} mode={mode}",
+                    severity="info",
+                    dedup_key=order.market_id,
                 )
+                try:
+                    asyncio.get_running_loop().create_task(coro)
+                except RuntimeError:
+                    asyncio.run(coro)
         except Exception:
             pass
         return pos

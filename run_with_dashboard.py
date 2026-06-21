@@ -238,6 +238,7 @@ class TradingBotWithDashboard:
                     telegram_bot_token=os.getenv("ALERT_TELEGRAM_BOT_TOKEN"),
                     telegram_chat_id=os.getenv("ALERT_TELEGRAM_CHAT_ID"),
                     cooldown_seconds=alerts_cfg.cooldown_seconds,
+                    min_severity=alerts_cfg.min_severity,
                 )
                 _alerts_mod.configure(_alerter)
                 logger.info("[Alerts] Configured (enabled=true)")

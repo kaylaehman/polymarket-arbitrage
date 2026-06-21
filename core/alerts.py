@@ -8,6 +8,8 @@ Module-level singleton pattern:
 
 Each channel send is wrapped in try/except + short httpx timeout — never raises.
 Per-(event_type, dedup_key) cooldown suppresses repeat noise.
+Critical-severity alerts always send (bypass cooldown) and always pass the
+min_severity gate.
 """
 
 from __future__ import annotations
@@ -63,18 +65,29 @@ class Alerter:
 
     _TIMEOUT = 5.0  # httpx timeout for each channel send
 
+    # Severity rank order (ascending); critical is always treated specially.
+    _SEVERITY_RANK: dict[str, int] = {
+        "debug": 0,
+        "info": 1,
+        "warning": 2,
+        "warn": 2,
+        "critical": 3,
+    }
+
     def __init__(
         self,
         discord_webhook: Optional[str],
         telegram_bot_token: Optional[str],
         telegram_chat_id: Optional[str],
         cooldown_seconds: float = 60.0,
+        min_severity: str = "info",
         now_fn: Callable[[], float] = time.monotonic,
     ) -> None:
         self._discord = discord_webhook or None
         self._tg_token = telegram_bot_token or None
         self._tg_chat = telegram_chat_id or None
         self._cooldown = cooldown_seconds
+        self._min_severity = min_severity
         self._now = now_fn
         # dedup store: (event_type, dedup_key) -> last send monotonic ts
         self._last_sent: dict[tuple[str, str], float] = {}
@@ -89,19 +102,40 @@ class Alerter:
     ) -> list[str]:
         """Send alert to each configured channel, respecting cooldown.
 
+        Critical alerts always send regardless of cooldown or min_severity.
+        Non-critical alerts are dropped when below min_severity or within cooldown.
+
         Returns:
             List of channel names that were attempted (may be empty if
-            within cooldown or no channels configured).
+            within cooldown / below threshold / no channels configured).
         """
         if not self._discord and not (self._tg_token and self._tg_chat):
             return []
 
-        # Per-(event_type, dedup_key) cooldown
+        is_critical = severity == "critical"
+
+        # Severity gate: drop messages below min_severity (critical always passes).
+        if not is_critical:
+            sev_rank = self._SEVERITY_RANK.get(severity, 1)
+            min_rank = self._SEVERITY_RANK.get(self._min_severity, 1)
+            if sev_rank < min_rank:
+                return []
+
+        # Per-(event_type, dedup_key) cooldown; critical bypasses but still records.
         cache_key = (event_type, dedup_key)
         now = self._now()
-        last = self._last_sent.get(cache_key)
-        if last is not None and (now - last) < self._cooldown:
-            return []
+
+        if not is_critical:
+            last = self._last_sent.get(cache_key)
+            if last is not None and (now - last) < self._cooldown:
+                return []
+
+        # I3: opportunistically evict stale entries to bound dict size.
+        if len(self._last_sent) > 512:
+            evict_age = max(self._cooldown, 3600.0)
+            stale = [k for k, ts in self._last_sent.items() if (now - ts) >= evict_age]
+            for k in stale:
+                del self._last_sent[k]
 
         self._last_sent[cache_key] = now
 
