@@ -76,13 +76,13 @@ def make_ctx(no_ask: float | None = 0.94):
 
 @pytest.mark.asyncio
 async def test_strategy_emits_no_candidate_on_longshot():
-    """YES=0.08 with no_ask=0.94 produces a NO maker candidate above score threshold.
+    """YES=0.08 Sports market produces a NO maker candidate above the default score threshold.
 
-    Note: structural_score("NO", 0.08, "Sports") = 0.01; we use min=0.005 so it passes.
-    The default config min=0.02 is a conservative gate. Tests use Sports + lower threshold
-    to exercise the emission path without depending on exact bias constants.
+    With the corrected structural_score(1 - yes_mid, "NO", category) call,
+    score = structural_score(0.92, "NO", "Sports") ≈ 0.10, which clears the
+    default min_structural_score=0.02 comfortably.
     """
-    strategy = default_strategy(min_structural_score=0.005)
+    strategy = default_strategy(min_structural_score=0.02)
     market = make_market(yes_price=0.08, category="Sports")
     candidates = await strategy.scan([market], make_ctx(no_ask=0.94))
 
@@ -92,13 +92,13 @@ async def test_strategy_emits_no_candidate_on_longshot():
     assert c.strategy == "maker_longshot"
     assert c.ai_probability is None
     assert c.confidence is None
-    assert c.edge >= 0.005
+    assert c.edge >= 0.02
 
 
 @pytest.mark.asyncio
 async def test_post_price_strictly_below_no_ask():
     """post_price must be strictly < no_ask so the order rests in the book."""
-    strategy = default_strategy(price_improvement_cents=1, min_structural_score=0.005)
+    strategy = default_strategy(price_improvement_cents=1)
     market = make_market(yes_price=0.08, category="Sports")
     no_ask = 0.94
     candidates = await strategy.scan([market], make_ctx(no_ask=no_ask))
@@ -184,7 +184,7 @@ async def test_post_price_safety_below_no_ask_after_clamp():
 @pytest.mark.asyncio
 async def test_candidate_fields_populated():
     """DirectionalCandidate has correct market_id, category, reasoning."""
-    strategy = default_strategy(min_structural_score=0.005)
+    strategy = default_strategy(min_structural_score=0.02)
     market = make_market(ticker="KX-SAMPLE", yes_price=0.10, category="Sports")
     candidates = await strategy.scan([market], make_ctx(no_ask=0.92))
 
@@ -652,18 +652,17 @@ def test_engine_builds_maker_longshot_strategy():
 async def test_engine_run_once_paper_records_maker_position():
     """run_once with a Sports longshot market in paper mode records a maker_longshot position.
 
-    Uses ml_min_score=0.005 because structural_score(0.08, 'NO', 'Sports') = 0.01,
-    which is above 0.005 but below the conservative default of 0.02. The lower threshold
-    is appropriate for tests verifying the execution path without depending on exact
-    bias constants. The default config threshold of 0.02 is the production gate.
+    With the corrected structural_score(1 - yes_mid, "NO", category) call,
+    structural_score(0.92, "NO", "Sports") ≈ 0.10, which clears the default
+    min_structural_score=0.02. No threshold workaround needed.
 
     The market uses event_ticker="KXNFL-..." so that categorize() returns "Sports",
     matching how the engine's scanner assigns category via categorize(event_ticker).
     """
     from core.directional.engine import DirectionalEngine
 
-    cfg = make_engine_config(sc_min_edge=999, ml_min_score=0.005, ml_max_yes=0.15)
-    # Longshot NFL (Sports) market: yes=0.08 → structural_score=0.01 > 0.005
+    cfg = make_engine_config(sc_min_edge=999, ml_min_score=0.02, ml_max_yes=0.15)
+    # Longshot NFL (Sports) market: yes=0.08 → structural_score(0.92, NO, Sports) ≈ 0.10 > 0.02
     market = make_market(ticker="KXNFL-25JAN15-TBD", yes_price=0.08, category="Sports")
     market.event_ticker = "KXNFL-25JAN15"
     market.series_ticker = "KXNFL"

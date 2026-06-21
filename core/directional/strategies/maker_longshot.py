@@ -5,6 +5,12 @@ structural longshot/NO bias (Jon-Becker/pma research) makes NO underpriced.
 Acting as MAKER (resting NO BUY limit at post_price, 0% fee) captures the
 spread + the bias. Hold to resolution.
 
+Structural score:
+    structural_score(1 - yes_mid, "NO", category) — passes the NO-side price
+    (1 - yes_mid) so the function reads it as a heavy-NO / longshot-YES market
+    and returns the correct positive bias. Passing yes_mid directly would
+    mis-read the longshot as a favorite and invert the score.
+
 Resting maker price:
     post_price = round(no_ask - price_improvement_cents/100.0, 2)
     clamped to [0.01, 0.99]; must be strictly below no_ask to be non-marketable.
@@ -23,7 +29,7 @@ class MakerLongshotStrategy(Strategy):
     """Post resting NO BUY limits on structurally-favoured longshot markets.
 
     Args:
-        min_structural_score: Minimum structural_score(yes_mid, "NO", category).
+        min_structural_score: Minimum structural_score(1 - yes_mid, "NO", category).
         max_yes_price: Skip markets where yes_mid > this (longshot filter).
         price_improvement_cents: How many cents below no_ask to post the bid.
         skip_categories: Category strings to skip entirely.
@@ -55,7 +61,7 @@ class MakerLongshotStrategy(Strategy):
         For each market:
         1. Skip excluded categories.
         2. Skip if yes_mid <= 0 or > max_yes_price (not a longshot).
-        3. Compute structural_score(yes_mid, "NO", category); skip if < min.
+        3. Compute structural_score(1 - yes_mid, "NO", category); skip if < min.
         4. Fetch no_ask; skip if unavailable.
         5. Build resting post_price strictly below no_ask.
         6. Emit NO DirectionalCandidate with strategy="maker_longshot".
@@ -71,7 +77,7 @@ class MakerLongshotStrategy(Strategy):
             if yes_mid <= 0 or yes_mid > self._max_yes:
                 continue
 
-            score = structural_score(yes_mid, "NO", market.category)
+            score = structural_score(1 - yes_mid, "NO", market.category)
             if score < self._min_score:
                 continue
 
