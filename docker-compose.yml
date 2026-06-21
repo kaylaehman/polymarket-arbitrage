@@ -19,6 +19,8 @@ services:
       # Drop secrets here (e.g. Kalshi kalshi.pem) and point KALSHI_PRIVATE_KEY
       # at /app/secrets/<file>. Directory is gitignored.
       - ./secrets:/app/secrets:ro
+      # Persist the directional SQLite DB (data/directional.db) across container recreates.
+      - ./data:/app/data
     # Dry-run is baked into config.yaml (mode.trading_mode: dry_run).
     # To go live: see GOING-LIVE.md, then either flip config.yaml or append --live here.
     command: ["python", "run_with_dashboard.py", "--config", "config.yaml", "--port", "8888"]
