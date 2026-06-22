@@ -139,6 +139,9 @@ async def collect_settled_markets(
                     ticker = fname[:-5]
                     data = _load_cache(cache_dir, series, ticker)
                     if data:
+                        # Ensure series_ticker is populated from the directory name
+                        if not data["market"].get("series_ticker"):
+                            data["market"]["series_ticker"] = series
                         results.append(data)
                         cached_tickers.add(ticker)
 
@@ -172,6 +175,9 @@ async def collect_settled_markets(
 
         for m in series_markets:
             m_dict = _market_to_dict(m)
+            # Force series_ticker from the known series context (API may return "")
+            if not m_dict.get("series_ticker"):
+                m_dict["series_ticker"] = series
             close_ts = _close_ts_from_dict(m_dict)
             start_ts = close_ts - 60 * 86400  # 60 days before close
             end_ts = close_ts
