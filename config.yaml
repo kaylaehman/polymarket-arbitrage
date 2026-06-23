@@ -254,7 +254,7 @@ directional:
     mode: paper                   # paper | live (paper until positive expectancy validated)
     min_structural_score: 0.02    # minimum structural_score(yes_mid, "NO", category) to emit
     min_yes_price: 0.05           # floor on yes_mid -> skip NO > 0.95 (avoid fat-tail extremes)
-    max_yes_price: 0.20           # longshot filter: loosened from 0.15; NO band [0.80, 0.95]
+    max_yes_price: 0.15           # backtest-tuned (115-trade sample): NO band [0.85, 0.95], best EV
     price_improvement_cents: 1    # cents below no_ask to post the resting NO BUY limit
     order_ttl_minutes: 60.0       # cancel unfilled live orders older than this
     skip_categories: []           # e.g. [Sports, Entertainment]
