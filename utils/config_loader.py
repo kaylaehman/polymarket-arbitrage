@@ -303,6 +303,24 @@ class WeatherCfg:
     require_forecast: bool = True
 
 
+
+@dataclass
+class FinancialCfg:
+    """Alpha Vantage gate config for Kalshi financial markets in MakerLongshotStrategy."""
+    enabled: bool = True
+    min_sigma: float = 2.5
+    price_ttl_minutes: int = 240
+    vol_ttl_hours: int = 24
+    horizon_days: int = 14
+    require_data: bool = True
+    underlyings: dict = field(default_factory=lambda: {
+        "BTC": "CURRENCY_EXCHANGE_RATE",
+        "ETH": "CURRENCY_EXCHANGE_RATE",
+        "WTI": "WTI",
+        "EURUSD": "CURRENCY_EXCHANGE_RATE",
+    })
+
+
 @dataclass
 class DirectionalConfig:
     """Directional trading mode config. Disabled by default (additive)."""
@@ -320,6 +338,7 @@ class DirectionalConfig:
     maker_longshot: MakerLongshotCfg = field(default_factory=MakerLongshotCfg)
     scanner: DirectionalScannerCfg = field(default_factory=DirectionalScannerCfg)
     weather: WeatherCfg = field(default_factory=WeatherCfg)
+    financial: FinancialCfg = field(default_factory=FinancialCfg)
 
 
 @dataclass
@@ -494,7 +513,8 @@ def _build_directional(data: dict) -> DirectionalConfig:
     maker_longshot = _build_dataclass(MakerLongshotCfg, data.get("maker_longshot", {}) or {})
     scanner = _build_dataclass(DirectionalScannerCfg, data.get("scanner", {}) or {})
     weather = _build_dataclass(WeatherCfg, data.get("weather", {}) or {})
-    _sub = ("caps", "safe_compounder", "ai_directional", "maker_longshot", "scanner", "weather")
+    financial = _build_dataclass(FinancialCfg, data.get("financial", {}) or {})
+    _sub = ("caps", "safe_compounder", "ai_directional", "maker_longshot", "scanner", "weather", "financial")
     top = {k: v for k, v in data.items() if k not in _sub}
     return _build_dataclass(DirectionalConfig, {
         **top,
@@ -504,6 +524,7 @@ def _build_directional(data: dict) -> DirectionalConfig:
         "maker_longshot": maker_longshot,
         "scanner": scanner,
         "weather": weather,
+        "financial": financial,
     })
 
 

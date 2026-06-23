@@ -105,9 +105,11 @@ class DirectionalEngine:
                     skip_categories=list(getattr(ml_cfg, "skip_categories", [])),
                     max_days_to_resolution=getattr(ml_cfg, "max_days_to_resolution", 90.0),
                     weather_cfg=weather_cfg,
+                    financial_cfg=getattr(config, "financial", None),
                 ), ml_cfg)
             )
         self._weather_cfg = weather_cfg
+        self._financial_cfg = getattr(config, "financial", None)
 
         # Build decider (caps from config; cash balance = 100 placeholder without a live query)
         self.decider = Decider(
@@ -172,9 +174,28 @@ class DirectionalEngine:
             _http_client = httpx.AsyncClient(timeout=10.0)
             sc_ctx = {**sc_ctx, "http": _http_client}
 
+        # Build AVClient for Alpha Vantage financial gate if API key is available.
+        import os
+        from core.market_data import AVClient
+        _av_client = None
+        _av_http = None
+        av_api_key = os.environ.get("ALPHAVANTAGE_API_KEY", "")
+        if (av_api_key
+                and self._financial_cfg is not None
+                and self._financial_cfg.enabled):
+            _av_http = httpx.AsyncClient(timeout=30.0)
+            _av_client = AVClient(
+                api_key=av_api_key,
+                price_ttl_s=self._financial_cfg.price_ttl_minutes * 60,
+                vol_ttl_s=self._financial_cfg.vol_ttl_hours * 3600,
+                http=_av_http,
+            )
+        if _av_client is not None:
+            sc_ctx = {**sc_ctx, "av": _av_client}
+
         # MakerLongshotStrategy needs the full pre-cap liquid universe so that
         # near-term longshots (e.g. KXCABLEAVE-26MAY22-26JUL at index 114) are not
-        # silently dropped by the spread-sort → cap(15) applied to the general list.
+        # silently dropped by the spread-sort -> cap(15) applied to the general list.
         # scanner.last_liquid holds all liquid+categorized markets before the cap;
         # no additional API calls are needed since last_books is already populated.
         maker_markets = self.scanner.last_liquid if self.scanner.last_liquid else markets
@@ -244,6 +265,9 @@ class DirectionalEngine:
         # Close the per-cycle weather HTTP client if we opened one.
         if _http_client is not None:
             await _http_client.aclose()
+        # Close the per-cycle AV HTTP client if we opened one.
+        if _av_http is not None:
+            await _av_http.aclose()
 
         await self.tracker.sweep(
             now=datetime.now(timezone.utc),
