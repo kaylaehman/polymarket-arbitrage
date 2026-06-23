@@ -321,6 +321,8 @@ directional:
     vol_ttl_hours: 24
     horizon_days: 14
     require_data: true
+    max_calls_per_day: 20
+    max_price_age_days: 3
     underlyings:
       BTC: CURRENCY_EXCHANGE_RATE
       ETH: CURRENCY_EXCHANGE_RATE

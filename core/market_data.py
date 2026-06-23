@@ -24,7 +24,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from math import isfinite, sqrt
 from statistics import stdev
 from typing import Optional
@@ -38,6 +38,18 @@ _SERIES_UNDERLYING: dict[str, str] = {
     "KXETHD":   "ETH",
     "KXWTI":    "WTI",
     "KXEURUSD": "EURUSD",
+}
+
+# FIX I1: Series determines market_type, not the T/B suffix.
+# KXBTC and KXETH are bucket series regardless of suffix.
+# KXBTCD, KXETHD, KXWTI, KXEURUSD are threshold series.
+_SERIES_TYPE: dict[str, str] = {
+    "KXBTC":    "bucket",
+    "KXBTCD":   "threshold",
+    "KXETH":    "bucket",
+    "KXETHD":   "threshold",
+    "KXWTI":    "threshold",
+    "KXEURUSD": "threshold",
 }
 
 _VOL_FALLBACK: dict[str, float] = {
@@ -98,24 +110,28 @@ def parse_financial_ticker(ticker: str) -> FinancialMarket | None:
     except ValueError:
         return None
 
-    if tb == "T":
+    # FIX I1: derive market_type from series, not from T/B suffix.
+    market_type = _SERIES_TYPE.get(series, "bucket")
+
+    if tb == "B":
+        # B-type bucket: bucket_lo = threshold value
         return FinancialMarket(
             series=series,
             underlying=underlying,
             threshold=threshold,
             direction="above",
             expiry=expiry,
-            market_type="threshold",
-        )
-    else:  # B-type bucket
-        return FinancialMarket(
-            series=series,
-            underlying=underlying,
-            threshold=threshold,
-            direction="above",
-            expiry=expiry,
-            market_type="bucket",
+            market_type=market_type,
             bucket_lo=threshold,
+        )
+    else:
+        return FinancialMarket(
+            series=series,
+            underlying=underlying,
+            threshold=threshold,
+            direction="above",
+            expiry=expiry,
+            market_type=market_type,
         )
 
 
@@ -130,14 +146,24 @@ def crossing_margin(price: float, vol: float, threshold: float, days: float) -> 
     """
     em = price * vol * sqrt(max(days, 1.0))
     if em <= 0:
-        return float("inf")
+        # FIX I2: degenerate em must route to SKIP (return -inf so z < min_sigma)
+        return float("-inf")
     return (threshold - price) / em
 
 
 class AVClient:
     """Alpha Vantage HTTP client with TTL cache and 1-req/sec rate-limit."""
 
-    def __init__(self, api_key: str, price_ttl_s: int, vol_ttl_s: int, *, http) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        price_ttl_s: int,
+        vol_ttl_s: int,
+        *,
+        http,
+        max_calls_per_day: int = 20,
+        max_price_age_days: int = 3,
+    ) -> None:
         self._api_key = api_key
         self._price_ttl_s = price_ttl_s
         self._vol_ttl_s = vol_ttl_s
@@ -147,9 +173,32 @@ class AVClient:
         self._price_cache: dict[str, tuple[float, float]] = {}
         self._vol_cache: dict[str, tuple[float, float]] = {}
         self._warned_rate: set[str] = set()
+        # FIX C2: daily call cap
+        self._max_calls_per_day: int = max_calls_per_day
+        self._daily_calls: int = 0
+        self._call_date: str = ""
+        self._warned_cap: bool = False
+        # FIX M1: WTI staleness threshold
+        self._max_price_age_days: int = max_price_age_days
 
     async def _fetch(self, params: dict) -> dict | None:
         """Acquire lock, throttle to 1/sec, fetch JSON. Returns None on any error."""
+        # FIX C2: check daily cap before acquiring lock
+        today_str = datetime.utcnow().strftime("%Y-%m-%d")
+        if today_str != self._call_date:
+            # Date has rolled over — reset counter
+            self._call_date = today_str
+            self._daily_calls = 0
+            self._warned_cap = False
+        if self._daily_calls >= self._max_calls_per_day:
+            if not self._warned_cap:
+                self._warned_cap = True
+                logger.warning(
+                    "[av] Daily call cap of %d reached — no further AV calls today",
+                    self._max_calls_per_day,
+                )
+            return None
+
         async with self._lock:
             now = time.monotonic()
             wait = 1.0 - (now - self._last_call)
@@ -164,6 +213,8 @@ class AVClient:
                 return None
             finally:
                 self._last_call = time.monotonic()
+                # FIX C2: increment daily call counter after each HTTP call
+                self._daily_calls += 1
 
         # Rate-limit detection
         if "Note" in data or "Information" in data:
@@ -216,14 +267,31 @@ class AVClient:
                     pts = data.get("data", [])
                     for pt in pts:
                         v = pt.get("value", ".")
-                        if v != ".":
-                            price = float(v)
+                        if v != ".": 
+                            pt_date_str = pt.get("date", "")
+                            try:
+                                pt_date = date.fromisoformat(pt_date_str)
+                                age_days = (date.today() - pt_date).days
+                                if age_days > self._max_price_age_days:
+                                    logger.info(
+                                        "[av] WTI price date %s is %d days old (max %d), treating as unavailable",
+                                        pt_date_str, age_days, self._max_price_age_days,
+                                    )
+                                    price = None
+                                else:
+                                    price = float(v)
+                            except (ValueError, AttributeError):
+                                price = float(v)  # fallback if date parse fails
                             break
                 except (KeyError, ValueError, TypeError):
                     pass
 
         else:
             logger.debug("[av] Unknown underlying %s, cannot fetch price", underlying)
+
+        # FIX I2: treat price <= 0 as None (degenerate / bad data)
+        if price is not None and price <= 0:
+            price = None
 
         if price is not None:
             self._price_cache[underlying] = (price, now)

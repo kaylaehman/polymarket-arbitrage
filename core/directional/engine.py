@@ -12,8 +12,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Any, Optional
+
+import httpx
 
 from core.directional.decider import Decider
 from core.directional.executor import Executor
@@ -32,7 +35,7 @@ class DirectionalEngine:
     """Top-level loop that orchestrates the directional trading cycle.
 
     Args:
-        config: The ``config.directional`` config namespace.
+        config: The config.directional config namespace.
         kalshi_client: Shared KalshiClient (read-only shared; arb loop unaffected).
         intelligence_engine: Shared IntelligenceEngine (may be None).
         risk_manager: Shared RiskManager (directional caps only).
@@ -50,6 +53,10 @@ class DirectionalEngine:
         self._intel = intelligence_engine
         self._rm = risk_manager
         self._running = False
+
+        # FIX C1: process-lived AV client — initialized lazily in _ensure_av_client()
+        self._av_client = None
+        self._av_http = None
 
         # Build store
         self.store = DirectionalStore(config.db_path)
@@ -142,12 +149,44 @@ class DirectionalEngine:
         # In paper mode this doesn't affect live money; live mode uses risk caps.
         return 100.0
 
+    def _ensure_av_client(self) -> None:
+        """FIX C1: Lazily initialize the process-lived AVClient on first call.
+
+        Subsequent calls are no-ops. The client and its httpx session persist
+        across run_once() cycles so TTL caches are preserved.
+        """
+        if self._av_client is not None:
+            return
+        from core.market_data import AVClient
+        av_api_key = os.environ.get("ALPHAVANTAGE_API_KEY", "")
+        if (av_api_key
+                and self._financial_cfg is not None
+                and self._financial_cfg.enabled):
+            self._av_http = httpx.AsyncClient(timeout=30.0)
+            max_calls = getattr(self._financial_cfg, "max_calls_per_day", 20)
+            max_age = getattr(self._financial_cfg, "max_price_age_days", 3)
+            self._av_client = AVClient(
+                api_key=av_api_key,
+                price_ttl_s=self._financial_cfg.price_ttl_minutes * 60,
+                vol_ttl_s=self._financial_cfg.vol_ttl_hours * 3600,
+                max_calls_per_day=max_calls,
+                max_price_age_days=max_age,
+                http=self._av_http,
+            )
+
+    async def close(self) -> None:
+        """FIX C1: Close the process-lived AV HTTP client on engine shutdown."""
+        if self._av_http is not None:
+            await self._av_http.aclose()
+            self._av_http = None
+            self._av_client = None
+
     def _build_sc_ctx(self) -> dict:
         """Build SafeCompounder context using scanner's already-fetched books.
 
-        The scanner populates ``scanner.last_books`` during scan(), so no second
+        The scanner populates scanner.last_books during scan(), so no second
         round of orderbook fetches is needed here.  The closure delegates to
-        ``scanner.no_ask(ticker)`` which reads from ``scanner.last_books``.
+        scanner.no_ask(ticker) which reads from scanner.last_books.
         """
         def no_ask_fn(ticker: str) -> float | None:
             return self.scanner.no_ask(ticker)
@@ -156,8 +195,6 @@ class DirectionalEngine:
 
     async def run_once(self) -> None:
         """Execute one full scan → decide → execute → sweep cycle."""
-        import httpx
-
         markets = await self.scanner.scan(self._cfg.markets_per_cycle)
 
         # SafeCompounder context — no_ask reads from scanner.last_books (no re-fetch)
@@ -174,24 +211,10 @@ class DirectionalEngine:
             _http_client = httpx.AsyncClient(timeout=10.0)
             sc_ctx = {**sc_ctx, "http": _http_client}
 
-        # Build AVClient for Alpha Vantage financial gate if API key is available.
-        import os
-        from core.market_data import AVClient
-        _av_client = None
-        _av_http = None
-        av_api_key = os.environ.get("ALPHAVANTAGE_API_KEY", "")
-        if (av_api_key
-                and self._financial_cfg is not None
-                and self._financial_cfg.enabled):
-            _av_http = httpx.AsyncClient(timeout=30.0)
-            _av_client = AVClient(
-                api_key=av_api_key,
-                price_ttl_s=self._financial_cfg.price_ttl_minutes * 60,
-                vol_ttl_s=self._financial_cfg.vol_ttl_hours * 3600,
-                http=_av_http,
-            )
-        if _av_client is not None:
-            sc_ctx = {**sc_ctx, "av": _av_client}
+        # FIX C1: use process-lived AVClient (lazily initialized, never closed per cycle).
+        self._ensure_av_client()
+        if self._av_client is not None:
+            sc_ctx = {**sc_ctx, "av": self._av_client}
 
         # MakerLongshotStrategy needs the full pre-cap liquid universe so that
         # near-term longshots (e.g. KXCABLEAVE-26MAY22-26JUL at index 114) are not
@@ -265,9 +288,7 @@ class DirectionalEngine:
         # Close the per-cycle weather HTTP client if we opened one.
         if _http_client is not None:
             await _http_client.aclose()
-        # Close the per-cycle AV HTTP client if we opened one.
-        if _av_http is not None:
-            await _av_http.aclose()
+        # FIX C1: do NOT close _av_http here — it's process-lived.
 
         await self.tracker.sweep(
             now=datetime.now(timezone.utc),

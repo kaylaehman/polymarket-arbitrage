@@ -106,6 +106,7 @@ def _make_av_client(http_mock) -> AVClient:
         api_key="TESTKEY",
         price_ttl_s=14400,
         vol_ttl_s=86400,
+        max_price_age_days=365,  # large sentinel so hardcoded fixture dates never go stale
         http=http_mock,
     )
 
@@ -282,3 +283,78 @@ def test_non_financial_market_untouched():
     """Weather ticker → parse_financial_ticker returns None, gate not applied."""
     result = parse_financial_ticker("KXHIGHNY-26JUN23-B75")
     assert result is None
+
+
+# ─── Regression tests for FIX I1, FIX I2, FIX M1, FIX C2 ─────────────────────
+
+
+def test_parse_financial_ticker_kxbtc_t_suffix_is_bucket():
+    """KXBTC (bucket series) with -T suffix must NOT be threshold-typed (FIX I1 regression)."""
+    fm = parse_financial_ticker("KXBTC-26JUN2317-T64875")
+    assert fm is not None
+    assert fm.market_type == "bucket", f"KXBTC is a bucket series; got market_type={fm.market_type!r}"
+    assert fm.series == "KXBTC"
+
+
+@pytest.mark.asyncio
+async def test_gate_skips_when_price_zero():
+    """price=0 from AV must be treated as None, so gate SKIPs under require_data=True (FIX I2)."""
+    http = AsyncMock()
+    http.get = AsyncMock(return_value=_make_mock_response({
+        "Realtime Currency Exchange Rate": {
+            "5. Exchange Rate": "0.0",
+            "6. Last Refreshed": "2026-06-23 02:03:20",
+        }
+    }))
+    client = _make_av_client(http)
+    price = await client.get_price("BTC")
+    assert price is None, f"price=0 must be treated as None; got {price}"
+
+
+@pytest.mark.asyncio
+async def test_avclient_wti_stale_date_returns_none():
+    """WTI price with date older than max_price_age_days must return None (FIX M1)."""
+    from datetime import date, timedelta
+    stale_date = (date.today() - timedelta(days=10)).isoformat()
+    stale_wti_resp = {
+        "name": "Crude Oil Prices WTI",
+        "data": [
+            {"date": stale_date, "value": "84.65"},
+        ],
+    }
+    http = AsyncMock()
+    http.get = AsyncMock(return_value=_make_mock_response(stale_wti_resp))
+    client = AVClient(
+        api_key="TESTKEY",
+        price_ttl_s=14400,
+        vol_ttl_s=86400,
+        max_price_age_days=3,
+        http=http,
+    )
+    price = await client.get_price("WTI")
+    assert price is None, f"Stale WTI (10 days old) must return None; got {price}"
+
+
+@pytest.mark.asyncio
+async def test_avclient_daily_cap_blocks_after_limit():
+    """After max_calls_per_day calls, further calls return None (FIX C2)."""
+    http = AsyncMock()
+    http.get = AsyncMock(return_value=_make_mock_response(BTC_EXCHANGE_RATE_RESP))
+    client = AVClient(
+        api_key="TESTKEY",
+        price_ttl_s=0,   # TTL=0 so each call hits the network
+        vol_ttl_s=0,
+        max_calls_per_day=2,
+        http=http,
+    )
+    # First two calls should succeed (price returned)
+    p1 = await client.get_price("BTC")
+    client._price_cache.clear()  # bypass TTL
+    p2 = await client.get_price("BTC")
+    client._price_cache.clear()
+    # Third call should hit cap
+    p3 = await client.get_price("BTC")
+    assert p1 is not None
+    assert p2 is not None
+    assert p3 is None, f"Expected None after cap; got {p3}"
+    assert http.get.call_count == 2, f"HTTP must not be called after cap; got {http.get.call_count} calls"

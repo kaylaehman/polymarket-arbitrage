@@ -313,6 +313,8 @@ class FinancialCfg:
     vol_ttl_hours: int = 24
     horizon_days: int = 14
     require_data: bool = True
+    max_calls_per_day: int = 20
+    max_price_age_days: int = 3
     underlyings: dict = field(default_factory=lambda: {
         "BTC": "CURRENCY_EXCHANGE_RATE",
         "ETH": "CURRENCY_EXCHANGE_RATE",
