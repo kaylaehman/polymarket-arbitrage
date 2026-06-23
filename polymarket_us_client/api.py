@@ -189,6 +189,67 @@ class PolymarketUSClient(BasePolymarketClient):
         raw = data.get("market", data)
         return self._parse_market(raw)
 
+    async def get_market_result(self, slug: str) -> Optional[str]:
+        """Return the winning side for a resolved PM.US market, or None if unresolved.
+
+        PM.US encodes resolution in ``marketSides[*].price``: a settled market
+        has the winning side at price ``"1"`` and the losing side at ``"0"``.
+
+        Works without calling ``connect()`` first — opens a temporary HTTP
+        session if needed (resolution checks are fire-and-forget read calls).
+
+        Returns:
+            ``"yes"`` if the YES side won, ``"no"`` if the NO side won,
+            ``None`` if the market is not yet resolved or the fetch fails.
+        """
+        try:
+            raw = await self._fetch_market_raw(slug)
+        except Exception:
+            return None
+
+        if raw is None or not raw.get("closed", False):
+            return None
+
+        return self._parse_market_result(raw)
+
+    async def _fetch_market_raw(self, slug: str) -> Optional[dict]:
+        """Fetch raw market dict from the public gateway; manages HTTP lifecycle."""
+        url = f"{self._gateway_url}/v1/market/slug/{slug}"
+        if self._http is not None:
+            resp = await self._http.get(url)
+            resp.raise_for_status()
+            data = resp.json()
+        else:
+            async with httpx.AsyncClient(timeout=self._timeout) as tmp:
+                resp = await tmp.get(url)
+                resp.raise_for_status()
+                data = resp.json()
+        return data.get("market", data)
+
+    @staticmethod
+    def _parse_market_result(raw: dict) -> Optional[str]:
+        """Extract winning side from resolved market JSON.
+
+        Returns ``"yes"``, ``"no"``, or ``None`` if not determinable.
+        """
+        sides = raw.get("marketSides", []) or []
+        yes_price: Optional[str] = None
+        no_price: Optional[str] = None
+        for side in sides:
+            desc = (side.get("description") or "").strip().lower()
+            is_long = side.get("long")
+            price_val = side.get("price")
+            if desc == "yes" or is_long is True:
+                yes_price = str(price_val) if price_val is not None else None
+            elif desc == "no" or is_long is False:
+                no_price = str(price_val) if price_val is not None else None
+
+        if yes_price == "1" and no_price == "0":
+            return "yes"
+        if yes_price == "0" and no_price == "1":
+            return "no"
+        return None
+
     def _parse_market(self, raw: dict) -> Market:
         slug = raw.get("slug", raw.get("marketSlug", raw.get("id", "")))
         volume = float(raw.get("volume", raw.get("volume24h", 0)) or 0)

@@ -301,3 +301,229 @@ async def test_live_close_sells_no_token_at_no_space_price(tmp_path):
     assert call["position"].side == "NO"
     assert abs(call["price"] - current_no_price) < 1e-9
     assert call["mode"] == "live"
+
+
+# ── PM.US resolution tests ─────────────────────────────────────────────────────
+
+def _pmus_pos(entry: float = 0.20, size: float = 10.0, strategy: str = "maker_longshot") -> DirectionalPosition:
+    """Helper: a paper NO position on a pmus: market."""
+    return DirectionalPosition(
+        market_id="pmus:tc-temp-nychigh-2026-06-28-gte80lt85f",
+        side="NO",
+        entry_price=entry,
+        size=size,
+        strategy=strategy,
+        mode="paper",
+        opened_at=datetime(2026, 6, 24, 0, 0, 0),
+        stop_loss=None,
+        take_profit=None,
+        notional=entry * size,
+        status="open",
+    )
+
+
+def _make_pmus_tracker(tmp_path, pmus_result, *, entry=0.20, size=10.0):
+    """Build a Tracker with a stubbed pmus_client and seed one pmus: position."""
+    store = DirectionalStore(str(tmp_path / "d.db"))
+    store.init_schema()
+    store.record_position(_pmus_pos(entry=entry, size=size))
+
+    kalshi_client = MagicMock()
+    kalshi_client.get_market = AsyncMock(return_value=MagicMock(result=None))
+
+    pmus_client = MagicMock()
+    pmus_client.get_market_result = AsyncMock(return_value=pmus_result)
+
+    executor = MagicMock()
+    executor.close_position = AsyncMock()
+
+    rm = MagicMock()
+    rm.state.kill_switch_triggered = False
+
+    tracker = Tracker(
+        store=store,
+        kalshi_client=kalshi_client,
+        executor=executor,
+        risk_manager=rm,
+        pmus_client=pmus_client,
+    )
+    return tracker, store
+
+
+@pytest.mark.asyncio
+async def test_pmus_no_wins_when_bucket_not_hit(tmp_path):
+    """NO bet WINS (+P&L) when PM.US resolves 'no' (bucket NOT hit)."""
+    entry, size = 0.20, 10.0
+    tracker, store = _make_pmus_tracker(tmp_path, pmus_result="no", entry=entry, size=size)
+
+    await tracker.sweep(now=datetime(2026, 6, 29, 12, 0, 0))
+
+    remaining = store.open_positions()
+    assert len(remaining) == 0, "Position should be closed after resolution"
+
+
+@pytest.mark.asyncio
+async def test_pmus_no_loses_when_bucket_hit(tmp_path):
+    """NO bet LOSES (-P&L) when PM.US resolves 'yes' (bucket HIT)."""
+    entry, size = 0.20, 10.0
+    tracker, store = _make_pmus_tracker(tmp_path, pmus_result="yes", entry=entry, size=size)
+
+    await tracker.sweep(now=datetime(2026, 6, 29, 12, 0, 0))
+
+    remaining = store.open_positions()
+    assert len(remaining) == 0, "Position should be closed after resolution"
+
+
+@pytest.mark.asyncio
+async def test_pmus_not_resolved_stays_open(tmp_path):
+    """Position stays open when PM.US market is not yet resolved (result=None)."""
+    tracker, store = _make_pmus_tracker(tmp_path, pmus_result=None)
+
+    await tracker.sweep(now=datetime(2026, 6, 29, 12, 0, 0))
+
+    remaining = store.open_positions()
+    assert len(remaining) == 1, "Position should remain open"
+    assert remaining[0].status == "open"
+
+
+@pytest.mark.asyncio
+async def test_pmus_no_client_stays_open(tmp_path):
+    """Position stays open gracefully when no pmus_client is configured."""
+    store = DirectionalStore(str(tmp_path / "d.db"))
+    store.init_schema()
+    store.record_position(_pmus_pos())
+
+    kalshi_client = MagicMock()
+    kalshi_client.get_market = AsyncMock(return_value=MagicMock(result=None))
+
+    executor = MagicMock()
+    executor.close_position = AsyncMock()
+
+    rm = MagicMock()
+    rm.state.kill_switch_triggered = False
+
+    # No pmus_client passed
+    tracker = Tracker(
+        store=store,
+        kalshi_client=kalshi_client,
+        executor=executor,
+        risk_manager=rm,
+    )
+    await tracker.sweep(now=datetime(2026, 6, 29, 12, 0, 0))
+
+    remaining = store.open_positions()
+    assert len(remaining) == 1, "Position should remain open without pmus_client"
+
+
+@pytest.mark.asyncio
+async def test_pmus_fetch_error_stays_open(tmp_path):
+    """Position stays open when get_market_result raises an exception."""
+    store = DirectionalStore(str(tmp_path / "d.db"))
+    store.init_schema()
+    store.record_position(_pmus_pos())
+
+    kalshi_client = MagicMock()
+    kalshi_client.get_market = AsyncMock(return_value=MagicMock(result=None))
+
+    pmus_client = MagicMock()
+    pmus_client.get_market_result = AsyncMock(side_effect=RuntimeError("network down"))
+
+    executor = MagicMock()
+    rm = MagicMock()
+    rm.state.kill_switch_triggered = False
+
+    tracker = Tracker(
+        store=store,
+        kalshi_client=kalshi_client,
+        executor=executor,
+        risk_manager=rm,
+        pmus_client=pmus_client,
+    )
+    await tracker.sweep(now=datetime(2026, 6, 29, 12, 0, 0))
+
+    remaining = store.open_positions()
+    assert len(remaining) == 1, "Position should remain open on fetch error"
+
+
+@pytest.mark.asyncio
+async def test_kalshi_resolution_unaffected(tmp_path):
+    """Kalshi positions still resolve correctly with pmus_client present."""
+    store = DirectionalStore(str(tmp_path / "d.db"))
+    store.init_schema()
+
+    kalshi_pos = DirectionalPosition(
+        market_id="kalshi:KXHIGHNY-26JUN23-B78",
+        side="NO",
+        entry_price=0.85,
+        size=5,
+        strategy="maker_longshot",
+        mode="paper",
+        opened_at=datetime(2026, 6, 18, 0, 0, 0),
+        stop_loss=None,
+        take_profit=None,
+        notional=4.25,
+        status="open",
+    )
+    store.record_position(kalshi_pos)
+
+    kalshi_client = MagicMock()
+    # Kalshi market resolves NO → our NO bet wins
+    kalshi_client.get_market = AsyncMock(return_value=MagicMock(result="no"))
+
+    pmus_client = MagicMock()
+    pmus_client.get_market_result = AsyncMock(return_value=None)
+
+    executor = MagicMock()
+    rm = MagicMock()
+    rm.state.kill_switch_triggered = False
+
+    tracker = Tracker(
+        store=store,
+        kalshi_client=kalshi_client,
+        executor=executor,
+        risk_manager=rm,
+        pmus_client=pmus_client,
+    )
+    await tracker.sweep(now=datetime(2026, 6, 29, 12, 0, 0))
+
+    remaining = store.open_positions()
+    assert len(remaining) == 0, "Kalshi position should be resolved and closed"
+
+
+@pytest.mark.asyncio
+async def test_pmus_pnl_math_no_wins(tmp_path):
+    """Verify exact P&L arithmetic for a NO win (resolution_price=1.0)."""
+    entry, size = 0.15, 20.0
+    tracker, store = _make_pmus_tracker(tmp_path, pmus_result="no", entry=entry, size=size)
+
+    await tracker.sweep(now=datetime(2026, 6, 29, 12, 0, 0))
+
+    # Use store internals to verify — find all positions
+    import sqlite3
+    conn = sqlite3.connect(str(tmp_path / "d.db"))
+    row = conn.execute("SELECT realized_pnl, status FROM directional_positions LIMIT 1").fetchone()
+    conn.close()
+
+    assert row is not None
+    assert row[1] == "closed"
+    expected_pnl = (1.0 - entry) * size  # = 17.0
+    assert abs(row[0] - expected_pnl) < 1e-6, f"Expected {expected_pnl}, got {row[0]}"
+
+
+@pytest.mark.asyncio
+async def test_pmus_pnl_math_no_loses(tmp_path):
+    """Verify exact P&L arithmetic for a NO loss (resolution_price=0.0)."""
+    entry, size = 0.15, 20.0
+    tracker, store = _make_pmus_tracker(tmp_path, pmus_result="yes", entry=entry, size=size)
+
+    await tracker.sweep(now=datetime(2026, 6, 29, 12, 0, 0))
+
+    import sqlite3
+    conn = sqlite3.connect(str(tmp_path / "d.db"))
+    row = conn.execute("SELECT realized_pnl, status FROM directional_positions LIMIT 1").fetchone()
+    conn.close()
+
+    assert row is not None
+    assert row[1] == "closed"
+    expected_pnl = (0.0 - entry) * size  # = -3.0
+    assert abs(row[0] - expected_pnl) < 1e-6, f"Expected {expected_pnl}, got {row[0]}"
