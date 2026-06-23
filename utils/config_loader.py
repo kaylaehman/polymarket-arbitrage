@@ -280,6 +280,30 @@ class DirectionalScannerCfg:
 
 
 @dataclass
+class WeatherCfg:
+    """Forecast-gate config for KXHIGH* weather markets in MakerLongshotStrategy.
+
+    When enabled, NO bets on T-type weather markets are gated by the NWS
+    forecast high fetched from api.weather.gov (keyless).  Only markets with
+    is_above_threshold=True (YES wins if hot) are affected; all other candidates
+    pass through unchanged.
+
+    safe_margin_f: min degrees the forecast must be BELOW the threshold for a
+        NO bet to be kept.  E.g. threshold=85, forecast=79, safe_margin_f=4.0
+        => margin=-6.0 <= -4.0 => KEEP.  If margin > -safe_margin_f => SKIP.
+    forecast_horizon_days: only gate markets closing within this many days.
+        Beyond the NWS horizon (~7 days) the gate cannot fire.
+    require_forecast: if True (default) and forecast is unavailable (NWS error,
+        beyond horizon), skip the weather candidate rather than betting blind.
+        If False, fall back to the structural NO bet when forecast unavailable.
+    """
+    enabled: bool = True
+    safe_margin_f: float = 4.0
+    forecast_horizon_days: int = 7
+    require_forecast: bool = True
+
+
+@dataclass
 class DirectionalConfig:
     """Directional trading mode config. Disabled by default (additive)."""
     enabled: bool = False
@@ -295,6 +319,7 @@ class DirectionalConfig:
     ai_directional: AiDirectionalCfg = field(default_factory=AiDirectionalCfg)
     maker_longshot: MakerLongshotCfg = field(default_factory=MakerLongshotCfg)
     scanner: DirectionalScannerCfg = field(default_factory=DirectionalScannerCfg)
+    weather: WeatherCfg = field(default_factory=WeatherCfg)
 
 
 @dataclass
@@ -468,8 +493,18 @@ def _build_directional(data: dict) -> DirectionalConfig:
     ai_directional = _build_dataclass(AiDirectionalCfg, data.get("ai_directional", {}) or {})
     maker_longshot = _build_dataclass(MakerLongshotCfg, data.get("maker_longshot", {}) or {})
     scanner = _build_dataclass(DirectionalScannerCfg, data.get("scanner", {}) or {})
-    top = {k: v for k, v in data.items() if k not in ("caps", "safe_compounder", "ai_directional", "maker_longshot", "scanner")}
-    return _build_dataclass(DirectionalConfig, {**top, "caps": caps, "safe_compounder": safe_compounder, "ai_directional": ai_directional, "maker_longshot": maker_longshot, "scanner": scanner})
+    weather = _build_dataclass(WeatherCfg, data.get("weather", {}) or {})
+    _sub = ("caps", "safe_compounder", "ai_directional", "maker_longshot", "scanner", "weather")
+    top = {k: v for k, v in data.items() if k not in _sub}
+    return _build_dataclass(DirectionalConfig, {
+        **top,
+        "caps": caps,
+        "safe_compounder": safe_compounder,
+        "ai_directional": ai_directional,
+        "maker_longshot": maker_longshot,
+        "scanner": scanner,
+        "weather": weather,
+    })
 
 
 def _build_catalyst(data: dict) -> "CatalystConfig":

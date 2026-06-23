@@ -14,16 +14,32 @@ Structural score:
 Resting maker price:
     post_price = round(no_ask - price_improvement_cents/100.0, 2)
     clamped to [0.01, 0.99]; must be strictly below no_ask to be non-marketable.
+
+Weather forecast gate (additive — only affects KXHIGH* T-type candidates):
+    For weather candidates closing within weather_cfg.forecast_horizon_days,
+    fetch the NWS forecast high and compute margin = forecast - threshold.
+    KEEP the NO bet only when margin <= -safe_margin_f (forecast comfortably
+    below the hot threshold).  SKIP when margin > -safe_margin_f (too risky).
+    Non-weather candidates pass through UNCHANGED.
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Optional
 
 from core.directional.models import DirectionalCandidate
 from core.directional.strategies.base import Strategy
+from core.weather import (
+    WeatherMarket,
+    forecast_high,
+    forecast_margin,
+    parse_weather_ticker,
+)
 from kalshi_client.models import KalshiMarket
 from utils.structural_bias import structural_score
+
+logger = logging.getLogger(__name__)
 
 
 class MakerLongshotStrategy(Strategy):
@@ -39,6 +55,7 @@ class MakerLongshotStrategy(Strategy):
         max_days_to_resolution: Skip markets whose close_time is more than this many
             days from now (or in the past). Markets with no close_time are skipped
             to be safe.
+        weather_cfg: Optional WeatherCfg; if None the weather gate is disabled.
     """
 
     def __init__(
@@ -49,6 +66,7 @@ class MakerLongshotStrategy(Strategy):
         skip_categories: list[str],
         min_yes_price: float = 0.05,
         max_days_to_resolution: float = 90.0,
+        weather_cfg: Optional[Any] = None,
     ) -> None:
         self._min_score = min_structural_score
         self._min_yes = min_yes_price
@@ -56,10 +74,54 @@ class MakerLongshotStrategy(Strategy):
         self._pip = price_improvement_cents
         self._skip = set(skip_categories)
         self._max_days = max_days_to_resolution
+        self._weather = weather_cfg  # WeatherCfg | None
 
     @property
     def name(self) -> str:
         return "maker_longshot"
+
+    async def _apply_weather_gate(
+        self,
+        market: KalshiMarket,
+        wm: WeatherMarket,
+        delta_days: float,
+        http: Any,
+    ) -> bool:
+        """Return True to KEEP the NO candidate; False to SKIP.
+
+        Only called when self._weather is not None and weather gate is enabled.
+        """
+        cfg = self._weather
+
+        # Beyond the NWS forecast horizon — no forecast available
+        if delta_days > cfg.forecast_horizon_days:
+            if cfg.require_forecast:
+                logger.debug(
+                    "[weather-gate] %s beyond horizon (%d > %d days), skipping",
+                    market.ticker, int(delta_days), cfg.forecast_horizon_days,
+                )
+                return False
+            return True  # require_forecast=False: structural fallback (keep)
+
+        fc = await forecast_high(wm.series, wm.date, http=http)
+
+        if fc is None:
+            if cfg.require_forecast:
+                logger.debug("[weather-gate] %s: no forecast, skipping", market.ticker)
+                return False
+            logger.debug(
+                "[weather-gate] %s: no forecast, structural fallback (keep)", market.ticker
+            )
+            return True
+
+        margin = forecast_margin(fc, wm.threshold)
+        keep = margin <= -cfg.safe_margin_f
+        logger.info(
+            "[weather-gate] %s: fc=%.1f threshold=%.1f margin=%.1f safe=%.1f -> %s",
+            market.ticker, fc, wm.threshold, margin, cfg.safe_margin_f,
+            "KEEP" if keep else "SKIP",
+        )
+        return keep
 
     async def scan(
         self,
@@ -74,10 +136,14 @@ class MakerLongshotStrategy(Strategy):
            (accepted band: min_yes_price <= yes_mid <= max_yes_price).
         3. Compute structural_score(1 - yes_mid, "NO", category); skip if < min.
         4. Fetch no_ask; skip if unavailable.
-        5. Build resting post_price strictly below no_ask.
-        6. Emit NO DirectionalCandidate with strategy="maker_longshot".
+        5. [Weather gate] If ticker parses as a KXHIGH* T-type above-threshold
+           market AND weather gate is enabled: apply NWS forecast gate.
+           Non-weather candidates skip step 5 unchanged.
+        6. Build resting post_price strictly below no_ask.
+        7. Emit NO DirectionalCandidate with strategy="maker_longshot".
         """
         no_ask_fn = ctx["no_ask"]
+        http = ctx.get("http")  # httpx.AsyncClient or compatible; None if not provided
         candidates: list[DirectionalCandidate] = []
 
         for market in markets:
@@ -104,6 +170,23 @@ class MakerLongshotStrategy(Strategy):
             no_ask = no_ask_fn(market.ticker)
             if no_ask is None:
                 continue
+
+            # Weather forecast gate — only for confirmed KXHIGH* T-type candidates
+            if self._weather is not None and self._weather.enabled:
+                wm = parse_weather_ticker(market.ticker)
+                if wm is not None and wm.is_above_threshold:
+                    if http is not None:
+                        keep = await self._apply_weather_gate(market, wm, delta_days, http)
+                    else:
+                        # No HTTP client in context: treat as forecast unavailable
+                        keep = not self._weather.require_forecast
+                        logger.debug(
+                            "[weather-gate] %s: no http client, require_forecast=%s -> %s",
+                            market.ticker, self._weather.require_forecast,
+                            "KEEP" if keep else "SKIP",
+                        )
+                    if not keep:
+                        continue
 
             # Build non-marketable resting bid: strictly < no_ask
             improvement = self._pip / 100.0

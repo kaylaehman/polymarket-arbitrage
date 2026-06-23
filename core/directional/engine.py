@@ -94,6 +94,7 @@ class DirectionalEngine:
             )
 
         ml_cfg = getattr(config, "maker_longshot", None)
+        weather_cfg = getattr(config, "weather", None)
         if ml_cfg is not None:
             self._strategies.append(
                 (MakerLongshotStrategy(
@@ -103,8 +104,10 @@ class DirectionalEngine:
                     price_improvement_cents=ml_cfg.price_improvement_cents,
                     skip_categories=list(getattr(ml_cfg, "skip_categories", [])),
                     max_days_to_resolution=getattr(ml_cfg, "max_days_to_resolution", 90.0),
+                    weather_cfg=weather_cfg,
                 ), ml_cfg)
             )
+        self._weather_cfg = weather_cfg
 
         # Build decider (caps from config; cash balance = 100 placeholder without a live query)
         self.decider = Decider(
@@ -151,10 +154,23 @@ class DirectionalEngine:
 
     async def run_once(self) -> None:
         """Execute one full scan → decide → execute → sweep cycle."""
+        import httpx
+
         markets = await self.scanner.scan(self._cfg.markets_per_cycle)
 
         # SafeCompounder context — no_ask reads from scanner.last_books (no re-fetch)
         sc_ctx = self._build_sc_ctx()
+
+        # Add an httpx client for the weather forecast gate when enabled.
+        # The client is shared across all weather candidates in this cycle (TTL cache
+        # in core.weather means NWS is called at most once per gridpoint per 15 min).
+        weather_enabled = (
+            self._weather_cfg is not None and self._weather_cfg.enabled
+        )
+        _http_client: Optional[Any] = None
+        if weather_enabled:
+            _http_client = httpx.AsyncClient(timeout=10.0)
+            sc_ctx = {**sc_ctx, "http": _http_client}
 
         # MakerLongshotStrategy needs the full pre-cap liquid universe so that
         # near-term longshots (e.g. KXCABLEAVE-26MAY22-26JUL at index 114) are not
@@ -224,6 +240,10 @@ class DirectionalEngine:
                 # same cycle don't re-post it (handles multiple candidates for
                 # the same market within one scan batch).
                 strategy_held.add(candidate.market_id)
+
+        # Close the per-cycle weather HTTP client if we opened one.
+        if _http_client is not None:
+            await _http_client.aclose()
 
         await self.tracker.sweep(
             now=datetime.now(timezone.utc),
