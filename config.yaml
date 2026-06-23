@@ -291,6 +291,15 @@ directional:
       - KXETH       # Ethereum price range
       - KXWTI       # WTI crude oil
       - KXEURUSD    # EUR/USD forex
+      # Sports futures: NBA/NHL championship + conference. PAPER forward-tracking only;
+      # structural longshot-NO bias is UNVALIDATED on 1 season (backtest p=0.15). Note: these
+      # resolve far out, so the 30d scanner/maker horizon only admits them near season-end.
+      - KXNBA         # NBA champion
+      - KXNHL         # NHL champion (Stanley Cup)
+      - KXNBAEAST     # NBA Eastern Conference
+      - KXNBAWEST     # NBA Western Conference
+      - KXNHLEAST     # NHL Eastern Conference
+      - KXNHLWEST     # NHL Western Conference
     max_days_to_resolution: 30  # only include series markets closing within N days
 
   # ── Weather forecast gate ───────────────────────────────────────────────────
