@@ -329,6 +329,11 @@ directional:
       WTI: WTI
       EURUSD: CURRENCY_EXCHANGE_RATE
 
+  pmus_weather:
+    enabled: true                 # gate the PM.US weather market source
+    max_days: 30.0               # only fetch markets resolving within N days
+    cache_ttl_seconds: 300.0     # PM.US fetch cache TTL (seconds)
+
 
 # ── Alerts ────────────────────────────────────────────────────────────────────
 # Push trade/kill-switch/position events to Discord and/or Telegram.
