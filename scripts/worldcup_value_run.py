@@ -20,6 +20,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -111,6 +112,48 @@ async def _fetch_wc_markets(client: httpx.AsyncClient) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Discord report ([EXPERIMENTAL PAPER WC]) — heartbeat even with zero bets
+# ---------------------------------------------------------------------------
+
+async def _post_discord(top5, n_markets, value_bets, ledger_summary) -> None:
+    webhook = os.getenv("ALERT_DISCORD_WEBHOOK")
+    if not webhook:
+        log.info("ALERT_DISCORD_WEBHOOK unset — skipping Discord post.")
+        return
+    lines = [
+        "**[EXPERIMENTAL PAPER WC]** — World Cup value scan",
+        "_observational only; calibration != edge, not pre-validated_",
+        "Model top win%: " + ", ".join(f"{t} {p:.0%}" for t, p in top5),
+        f"Priceable PM.US WC markets: {n_markets}",
+    ]
+    if value_bets:
+        lines.append(f"**{len(value_bets)} value bet(s) >= {VALUE_MARGIN:.0%}:**")
+        for vb in value_bets[:8]:
+            lines.append(
+                f"  {vb.team_slug} {vb.outcome_type}: model {vb.model_prob:.0%} "
+                f"vs mkt {vb.market_price:.0%} (edge {vb.edge:+.0%}, ${vb.kelly_stake:.2f})"
+            )
+    else:
+        lines.append(f"No value bets >= {VALUE_MARGIN:.0%} — market efficiently priced vs the model.")
+    if ledger_summary:
+        lines.append(
+            f"Paper ledger: {ledger_summary.get('total_bets', 0)} bets, "
+            f"P&L ${ledger_summary.get('total_pnl') or 0:.2f}"
+        )
+    try:
+        async with httpx.AsyncClient() as c:
+            await c.post(
+                webhook,
+                json={"content": "\n".join(lines)},
+                headers={"User-Agent": "polymarket-arb-wc/1.0"},
+                timeout=10.0,
+            )
+        log.info("Posted WC summary to Discord.")
+    except Exception as e:  # never raise into the run
+        log.warning(f"Discord post failed: {e}")
+
+
+# ---------------------------------------------------------------------------
 # Main orchestration
 # ---------------------------------------------------------------------------
 
@@ -184,6 +227,7 @@ async def run(n_simulations: int, dry_run: bool, db_path: Path | None) -> None:
             f"Ledger summary: total={summary['total_bets']} open={summary['open_bets']} "
             f"staked=${summary['total_staked'] or 0:.2f} pnl=${summary['total_pnl'] or 0:.2f}"
         )
+        await _post_discord(top5, len(markets), value_bets, summary)
 
     log.info("=== WC2026 Value Run DONE ===")
 
