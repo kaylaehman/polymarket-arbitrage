@@ -284,6 +284,13 @@ directional:
       - KXPCECORE     # US Core PCE
       - KXGDP         # US GDP
       - KXFEDDECISION # FOMC rate decision
+      # Financial: Kalshi crypto/commodity/forex series
+      - KXBTCD      # Bitcoin daily close threshold
+      - KXBTC       # Bitcoin price range
+      - KXETHD      # Ethereum daily close threshold
+      - KXETH       # Ethereum price range
+      - KXWTI       # WTI crude oil
+      - KXEURUSD    # EUR/USD forex
     max_days_to_resolution: 30  # only include series markets closing within N days
 
   # ── Weather forecast gate ───────────────────────────────────────────────────
@@ -301,6 +308,26 @@ directional:
     safe_margin_f: 4.0           # forecast must be >= 4F below threshold to KEEP NO bet
     forecast_horizon_days: 7     # NWS forecasts ~7 days out; skip gate beyond this
     require_forecast: true       # skip weather candidate if NWS unavailable (vs bet blind)
+
+  # ── Alpha Vantage financial gate ──────────────────────────────────────────
+  # Z-score gate for KXBTC*/KXETH*/KXWTI/KXEURUSD T-type threshold markets.
+  # Requires ALPHAVANTAGE_API_KEY env var; free tier = 25 calls/day.
+  # min_sigma: skip NO bet if threshold is within min_sigma expected-moves of
+  #   current price.  require_data: skip when AV unavailable (vs bet blind).
+  financial:
+    enabled: true
+    min_sigma: 2.5
+    price_ttl_minutes: 240
+    vol_ttl_hours: 24
+    horizon_days: 14
+    require_data: true
+    max_calls_per_day: 20
+    max_price_age_days: 3
+    underlyings:
+      BTC: CURRENCY_EXCHANGE_RATE
+      ETH: CURRENCY_EXCHANGE_RATE
+      WTI: WTI
+      EURUSD: CURRENCY_EXCHANGE_RATE
 
 
 # ── Alerts ────────────────────────────────────────────────────────────────────

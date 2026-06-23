@@ -30,6 +30,7 @@ from typing import Any, Optional
 
 from core.directional.models import DirectionalCandidate
 from core.directional.strategies.base import Strategy
+from core.market_data import FinancialMarket, crossing_margin, parse_financial_ticker
 from core.weather import (
     WeatherBucket,
     WeatherMarket,
@@ -70,6 +71,7 @@ class MakerLongshotStrategy(Strategy):
         min_yes_price: float = 0.05,
         max_days_to_resolution: float = 90.0,
         weather_cfg: Optional[Any] = None,
+        financial_cfg: Optional[Any] = None,
     ) -> None:
         self._min_score = min_structural_score
         self._min_yes = min_yes_price
@@ -78,6 +80,7 @@ class MakerLongshotStrategy(Strategy):
         self._skip = set(skip_categories)
         self._max_days = max_days_to_resolution
         self._weather = weather_cfg  # WeatherCfg | None
+        self._financial = financial_cfg  # FinancialCfg | None
 
     @property
     def name(self) -> str:
@@ -164,6 +167,48 @@ class MakerLongshotStrategy(Strategy):
         )
         return keep
 
+
+    async def _apply_financial_gate(
+        self,
+        market,
+        fm: "FinancialMarket",
+        delta_days: float,
+        ctx: dict,
+    ) -> bool:
+        """Return True to KEEP the T-type financial NO candidate; False to SKIP."""
+        cfg = self._financial
+        av = ctx.get("av")
+
+        if delta_days > cfg.horizon_days:
+            if cfg.require_data:
+                logger.debug("[financial-gate] %s beyond horizon (%d > %d days), skipping",
+                            market.ticker, int(delta_days), cfg.horizon_days)
+                return False
+            return True
+
+        if av is None:
+            keep = not cfg.require_data
+            logger.debug("[financial-gate] %s: no av client, require_data=%s -> %s",
+                        market.ticker, cfg.require_data, "KEEP" if keep else "SKIP")
+            return keep
+
+        price = await av.get_price(fm.underlying)
+        if price is None:
+            keep = not cfg.require_data
+            logger.debug("[financial-gate] %s: price unavailable, require_data=%s -> %s",
+                        market.ticker, cfg.require_data, "KEEP" if keep else "SKIP")
+            return keep
+
+        vol = await av.daily_vol(fm.underlying)
+        z = crossing_margin(price, vol, fm.threshold, delta_days)
+        keep = z >= cfg.min_sigma
+        logger.info(
+            "[financial-gate] %s: price=%.4f vol=%.4f threshold=%.4f days=%.1f z=%.2f min_sigma=%.1f -> %s",
+            market.ticker, price, vol, fm.threshold, delta_days, z, cfg.min_sigma,
+            "KEEP" if keep else "SKIP",
+        )
+        return keep
+
     async def scan(
         self,
         markets: list[KalshiMarket],
@@ -237,6 +282,13 @@ class MakerLongshotStrategy(Strategy):
                         )
                         if not keep:
                             continue
+
+            # Financial market gate — KXBTC*/KXETH*/KXWTI/KXEURUSD T-type above-threshold
+            if self._financial is not None and self._financial.enabled:
+                fm = parse_financial_ticker(market.ticker)
+                if fm is not None and fm.market_type == "threshold" and fm.direction == "above":
+                    if not await self._apply_financial_gate(market, fm, delta_days, ctx):
+                        continue
 
             # Build non-marketable resting bid: strictly < no_ask
             improvement = self._pip / 100.0
