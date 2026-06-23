@@ -1,0 +1,182 @@
+[
+  {
+    "series": "KXHIGHNY",
+    "settled_count": 20,
+    "sampled": 20,
+    "longshot_count": 6
+  },
+  {
+    "series": "KXNHL",
+    "settled_count": 20,
+    "sampled": 20,
+    "longshot_count": 6
+  },
+  {
+    "series": "KXNBA",
+    "settled_count": 18,
+    "sampled": 18,
+    "longshot_count": 4
+  },
+  {
+    "series": "KXGDP",
+    "settled_count": 8,
+    "sampled": 8,
+    "longshot_count": 2
+  },
+  {
+    "series": "KXCPI",
+    "settled_count": 20,
+    "sampled": 20,
+    "longshot_count": 1
+  },
+  {
+    "series": "KXBTC",
+    "settled_count": 20,
+    "sampled": 20,
+    "longshot_count": 0
+  },
+  {
+    "series": "KXETH",
+    "settled_count": 20,
+    "sampled": 20,
+    "longshot_count": 0
+  },
+  {
+    "series": "KXBTCR",
+    "settled_count": 0,
+    "sampled": 0,
+    "longshot_count": 0
+  },
+  {
+    "series": "KXETHR",
+    "settled_count": 0,
+    "sampled": 0,
+    "longshot_count": 0
+  },
+  {
+    "series": "KXSPX",
+    "settled_count": 0,
+    "sampled": 0,
+    "longshot_count": 0
+  },
+  {
+    "series": "KXNASDAQ",
+    "settled_count": 0,
+    "sampled": 0,
+    "longshot_count": 0
+  },
+  {
+    "series": "KXDOW",
+    "settled_count": 0,
+    "sampled": 0,
+    "longshot_count": 0
+  },
+  {
+    "series": "KXSPXR",
+    "settled_count": 0,
+    "sampled": 0,
+    "longshot_count": 0
+  },
+  {
+    "series": "KXNFP",
+    "settled_count": 0,
+    "sampled": 0,
+    "longshot_count": 0
+  },
+  {
+    "series": "KXJOBS",
+    "settled_count": 0,
+    "sampled": 0,
+    "longshot_count": 0
+  },
+  {
+    "series": "KXUNEMPLOYMENT",
+    "settled_count": 0,
+    "sampled": 0,
+    "longshot_count": 0
+  },
+  {
+    "series": "KXSENATE",
+    "settled_count": 0,
+    "sampled": 0,
+    "longshot_count": 0
+  },
+  {
+    "series": "KXHOUSE",
+    "settled_count": 0,
+    "sampled": 0,
+    "longshot_count": 0
+  },
+  {
+    "series": "KXPRES",
+    "settled_count": 0,
+    "sampled": 0,
+    "longshot_count": 0
+  },
+  {
+    "series": "KXGOV",
+    "settled_count": 0,
+    "sampled": 0,
+    "longshot_count": 0
+  },
+  {
+    "series": "KXHURRICANE",
+    "settled_count": 0,
+    "sampled": 0,
+    "longshot_count": 0
+  },
+  {
+    "series": "KXSTORM",
+    "settled_count": 0,
+    "sampled": 0,
+    "longshot_count": 0
+  },
+  {
+    "series": "KXTEMP",
+    "settled_count": 0,
+    "sampled": 0,
+    "longshot_count": 0
+  },
+  {
+    "series": "KXTEMPNY",
+    "settled_count": 0,
+    "sampled": 0,
+    "longshot_count": 0
+  },
+  {
+    "series": "KXOSCARS",
+    "settled_count": 0,
+    "sampled": 0,
+    "longshot_count": 0
+  },
+  {
+    "series": "KXEMMYS",
+    "settled_count": 0,
+    "sampled": 0,
+    "longshot_count": 0
+  },
+  {
+    "series": "KXGRAMMYS",
+    "settled_count": 0,
+    "sampled": 0,
+    "longshot_count": 0
+  },
+  {
+    "series": "KXNFL",
+    "settled_count": 0,
+    "sampled": 0,
+    "longshot_count": 0
+  },
+  {
+    "series": "KXMLB",
+    "settled_count": 0,
+    "sampled": 0,
+    "longshot_count": 0
+  },
+  {
+    "series": "KXFEDDECISION",
+    "settled_count": 10,
+    "sampled": 10,
+    "longshot_count": 0
+  }
+]

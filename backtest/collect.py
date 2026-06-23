@@ -16,6 +16,7 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 DEFAULT_SERIES = [
+    # Original macro set
     "KXCPI",
     "KXCPIYOY",
     "KXCPICORE",
@@ -23,6 +24,10 @@ DEFAULT_SERIES = [
     "KXPCECORE",
     "KXGDP",
     "KXFEDDECISION",
+    # Added via series discovery (longshot_count > 0 in sampling run)
+    "KXHIGHNY",   # NY daily high temp — longshot=6/20
+    "KXNHL",      # NHL team props — longshot=6/20
+    "KXNBA",      # NBA team props — longshot=4/18
 ]
 
 
