@@ -286,6 +286,22 @@ directional:
       - KXFEDDECISION # FOMC rate decision
     max_days_to_resolution: 30  # only include series markets closing within N days
 
+  # ── Weather forecast gate ───────────────────────────────────────────────────
+  # Enables NWS forecast gating for KXHIGH* T-type longshot NO bets.
+  # Uses api.weather.gov (keyless, free).  Additive: only affects weather-series
+  # candidates; macro/non-weather candidates pass through unchanged.
+  #
+  # Confirmed resolution stations (2026-06-22):
+  #   KXHIGHNY  -> Central Park, NY          (40.7829, -73.9654)
+  #   KXHIGHCHI -> Chicago Midway Airport    (41.7868, -87.7522)
+  #   KXHIGHLAX -> Los Angeles Airport       (33.9425, -118.4081)
+  #   KXHIGHMIA -> Miami International       (25.7959, -80.2870)
+  weather:
+    enabled: true
+    safe_margin_f: 4.0           # forecast must be >= 4F below threshold to KEEP NO bet
+    forecast_horizon_days: 7     # NWS forecasts ~7 days out; skip gate beyond this
+    require_forecast: true       # skip weather candidate if NWS unavailable (vs bet blind)
+
 
 # ── Alerts ────────────────────────────────────────────────────────────────────
 # Push trade/kill-switch/position events to Discord and/or Telegram.
