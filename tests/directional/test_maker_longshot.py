@@ -507,6 +507,46 @@ async def test_tracker_maker_resolves_settles_pnl(tmp_path):
     assert abs(summary["total_realized_pnl"] - 0.35) < 1e-6
 
 
+async def test_tracker_strips_venue_prefix_before_get_market(tmp_path):
+    """Regression: tracker must call get_market with the BARE ticker, not the
+    'kalshi:'-prefixed market_id. Without stripping, get_market returns nothing
+    and resolution NEVER fires (every paper position stuck open, $0 realized)."""
+    store = DirectionalStore(str(tmp_path / "d.db"))
+    store.init_schema()
+    store.record_position(
+        DirectionalPosition(
+            market_id="kalshi:KXHIGHNY-26JUN22-B74.5",
+            side="NO",
+            entry_price=0.93,
+            size=8,
+            strategy="maker_longshot",
+            mode="paper",
+            opened_at=datetime(2026, 6, 22, 0, 0, 0),
+            stop_loss=None,
+            take_profit=None,
+            notional=7.44,
+            status="open",
+        )
+    )
+
+    seen = {}
+
+    async def fake_get_market(ticker):
+        seen["ticker"] = ticker
+        m = MagicMock()
+        # Only the BARE ticker resolves; the prefixed form returns no result.
+        m.result = "no" if ticker == "KXHIGHNY-26JUN22-B74.5" else None
+        return m
+
+    client = MagicMock()
+    client.get_market = fake_get_market
+    tracker = Tracker(store, kalshi_client=client, executor=MagicMock(), risk_manager=MagicMock())
+    await tracker.sweep(now=datetime(2026, 6, 23, 0, 0, 0))
+
+    assert seen["ticker"] == "KXHIGHNY-26JUN22-B74.5"  # prefix stripped
+    assert store.pnl_summary()["closed_count"] == 1     # NO won → settled
+
+
 
 @pytest.mark.asyncio
 async def test_skips_long_dated_market():

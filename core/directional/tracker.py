@@ -140,10 +140,18 @@ class Tracker:
         Returns True if the position was closed by resolution.
         Resolution settlement is allowed regardless of kill-switch state.
         """
+        mid = pos.market_id
+        if mid.startswith("pmus:"):
+            # PM.US resolution is not yet wired into the tracker (kalshi_client
+            # only). PM.US weather positions settle via a follow-up; skip for now.
+            return False
+        # Strip the venue prefix: market_id is "kalshi:<ticker>" but get_market
+        # expects the bare ticker. Without this, resolution NEVER fires.
+        ticker = mid.split(":", 1)[1] if mid.startswith("kalshi:") else mid
         try:
-            market = await self._client.get_market(pos.market_id)
+            market = await self._client.get_market(ticker)
         except Exception as exc:
-            logger.debug("get_market failed for %s: %s", pos.market_id, exc)
+            logger.debug("get_market failed for %s: %s", ticker, exc)
             return False
 
         if market is None or market.result is None:
