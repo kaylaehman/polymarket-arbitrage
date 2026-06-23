@@ -387,3 +387,111 @@ async def test_pmus_fetch_failure_maker_still_works_with_kalshi():
     # Should still produce a candidate for the Kalshi market
     assert len(candidates) == 1
     assert "KX-POLITICS-999" in candidates[0].market_id
+
+
+# ── PolymarketUSClient.get_market_result / _parse_market_result ────────────────
+
+from polymarket_us_client.api import PolymarketUSClient
+
+
+def _make_market_sides(yes_price: str, no_price: str) -> list[dict]:
+    """Build a marketSides list matching PM.US gateway format."""
+    return [
+        {"description": "Yes", "long": True, "price": yes_price},
+        {"description": "No", "long": False, "price": no_price},
+    ]
+
+
+def test_parse_market_result_yes_wins():
+    """YES price=1 / NO price=0 → 'yes'."""
+    raw = {
+        "closed": True,
+        "marketSides": _make_market_sides("1", "0"),
+    }
+    assert PolymarketUSClient._parse_market_result(raw) == "yes"
+
+
+def test_parse_market_result_no_wins():
+    """YES price=0 / NO price=1 → 'no'."""
+    raw = {
+        "closed": True,
+        "marketSides": _make_market_sides("0", "1"),
+    }
+    assert PolymarketUSClient._parse_market_result(raw) == "no"
+
+
+def test_parse_market_result_live_price_returns_none():
+    """Mid-price values (not 0 or 1) → None (market not yet settled)."""
+    raw = {
+        "closed": False,
+        "marketSides": _make_market_sides("0.65", "0.35"),
+    }
+    # Not closed, prices are mid — should return None
+    assert PolymarketUSClient._parse_market_result(raw) is None
+
+
+def test_parse_market_result_empty_sides_returns_none():
+    """No marketSides → None."""
+    raw = {"closed": True, "marketSides": []}
+    assert PolymarketUSClient._parse_market_result(raw) is None
+
+
+def test_parse_market_result_uses_long_flag():
+    """Resolution mapping works via the ``long`` boolean flag (not just description)."""
+    raw = {
+        "closed": True,
+        "marketSides": [
+            {"long": True, "price": "0"},   # YES side lost
+            {"long": False, "price": "1"},  # NO side won
+        ],
+    }
+    assert PolymarketUSClient._parse_market_result(raw) == "no"
+
+
+@pytest.mark.asyncio
+async def test_get_market_result_returns_none_on_fetch_error():
+    """get_market_result returns None (not raises) when the HTTP request fails."""
+    client = PolymarketUSClient(dry_run=True)
+
+    async def bad_fetch(slug):
+        raise RuntimeError("network error")
+
+    client._fetch_market_raw = bad_fetch
+    result = await client.get_market_result("some-slug")
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_get_market_result_returns_none_when_not_closed():
+    """get_market_result returns None when market is not yet closed."""
+    client = PolymarketUSClient(dry_run=True)
+    client._fetch_market_raw = AsyncMock(return_value={
+        "closed": False,
+        "marketSides": _make_market_sides("0.45", "0.55"),
+    })
+    result = await client.get_market_result("tc-temp-nychigh-2026-06-28-gte80lt85f")
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_get_market_result_yes_resolved():
+    """get_market_result returns 'yes' when YES side settled at 1."""
+    client = PolymarketUSClient(dry_run=True)
+    client._fetch_market_raw = AsyncMock(return_value={
+        "closed": True,
+        "marketSides": _make_market_sides("1", "0"),
+    })
+    result = await client.get_market_result("tc-temp-mdwhigh-2026-04-29-gte57lt58f")
+    assert result == "yes"
+
+
+@pytest.mark.asyncio
+async def test_get_market_result_no_resolved():
+    """get_market_result returns 'no' when NO side settled at 1."""
+    client = PolymarketUSClient(dry_run=True)
+    client._fetch_market_raw = AsyncMock(return_value={
+        "closed": True,
+        "marketSides": _make_market_sides("0", "1"),
+    })
+    result = await client.get_market_result("tc-temp-mdwhigh-2026-04-29-gte59lt60f")
+    assert result == "no"

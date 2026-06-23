@@ -20,7 +20,7 @@ Pure function
 
 Tracker class
 -------------
-``Tracker(store, kalshi_client, executor, risk_manager)``
+``Tracker(store, kalshi_client, executor, risk_manager, pmus_client=None)``
 
   ``async sweep(now: datetime, max_hold_hours, order_ttl_minutes)``:
     1. For AI-directional positions ONLY: fetch current price; call should_exit.
@@ -101,11 +101,12 @@ def should_exit(
 class Tracker:
     """Sweep open directional positions and apply exit rules."""
 
-    def __init__(self, store, kalshi_client, executor, risk_manager) -> None:
+    def __init__(self, store, kalshi_client, executor, risk_manager, pmus_client=None) -> None:
         self._store = store
         self._client = kalshi_client
         self._executor = executor
         self._risk = risk_manager
+        self._pmus_client = pmus_client
 
     async def sweep(
         self,
@@ -142,9 +143,8 @@ class Tracker:
         """
         mid = pos.market_id
         if mid.startswith("pmus:"):
-            # PM.US resolution is not yet wired into the tracker (kalshi_client
-            # only). PM.US weather positions settle via a follow-up; skip for now.
-            return False
+            return await self._check_pmus_resolution(pos)
+
         # Strip the venue prefix: market_id is "kalshi:<ticker>" but get_market
         # expects the bare ticker. Without this, resolution NEVER fires.
         ticker = mid.split(":", 1)[1] if mid.startswith("kalshi:") else mid
@@ -178,6 +178,57 @@ class Tracker:
             "Resolved %s %s side=%s pnl=%.4f",
             pos.market_id,
             market.result,
+            pos.side,
+            realized_pnl,
+        )
+        return True
+
+    async def _check_pmus_resolution(self, pos: DirectionalPosition) -> bool:
+        """Settle a pmus: position if the PM.US market has resolved.
+
+        Resolution mapping:
+          - PM.US YES wins (bucket HIT)   → resolution_price = 0.0 for our NO bet.
+          - PM.US NO wins  (bucket MISSED) → resolution_price = 1.0 for our NO bet.
+
+        P&L formula (matching Kalshi convention):
+          realized_pnl = (resolution_price - entry_price) * size
+
+        Returns True if the position was closed by resolution, False otherwise.
+        Never raises — errors return False so the sweep continues.
+        """
+        if self._pmus_client is None:
+            return False
+
+        slug = pos.market_id.split("pmus:", 1)[1] if pos.market_id.startswith("pmus:") else pos.market_id
+        try:
+            result = await self._pmus_client.get_market_result(slug)
+        except Exception as exc:
+            logger.debug("pmus get_market_result failed for %s: %s", slug, exc)
+            return False
+
+        if result is None:
+            return False
+
+        # "yes" → YES side won → bucket was HIT → our NO bet LOST.
+        # "no"  → NO side won  → bucket MISSED  → our NO bet WON.
+        if result == "yes":
+            resolution_price = 1.0 if pos.side == "YES" else 0.0
+        elif result == "no":
+            resolution_price = 1.0 if pos.side == "NO" else 0.0
+        else:
+            return False
+
+        realized_pnl = (resolution_price - pos.entry_price) * pos.size
+        self._store.update_position(
+            pos.market_id,
+            status="closed",
+            realized_pnl=realized_pnl,
+            closed_at=datetime.now(timezone.utc).isoformat(),
+        )
+        logger.info(
+            "Resolved %s %s side=%s pnl=%.4f",
+            pos.market_id,
+            result,
             pos.side,
             realized_pnl,
         )

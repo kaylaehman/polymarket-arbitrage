@@ -28,6 +28,7 @@ from core.directional.strategies.safe_compounder import SafeCompounder
 from core.directional.tracker import Tracker
 from utils.kalshi_categories import categorize
 from core.directional.pmus_weather_source import PMUSWeatherSource
+from polymarket_us_client.api import PolymarketUSClient
 
 logger = logging.getLogger(__name__)
 
@@ -122,12 +123,16 @@ class DirectionalEngine:
         # PM.US weather source — config gated (default enabled=True)
         pmus_cfg = getattr(config, "pmus_weather", None)
         self._pmus_source: Optional[PMUSWeatherSource] = None
+        self._pmus_client: Optional[PolymarketUSClient] = None
         if pmus_cfg is not None and getattr(pmus_cfg, "enabled", True):
             self._pmus_source = PMUSWeatherSource(
                 http=None,  # http client injected per-cycle in run_once
                 max_days=getattr(pmus_cfg, "max_days", 30.0),
                 cache_ttl_seconds=getattr(pmus_cfg, "cache_ttl_seconds", 300.0),
             )
+            # Lightweight unauthenticated client for resolution checks only;
+            # no credentials needed — get_market_result hits the public gateway.
+            self._pmus_client = PolymarketUSClient(dry_run=True)
 
         # Build decider (caps from config; cash balance = 100 placeholder without a live query)
         self.decider = Decider(
@@ -142,12 +147,13 @@ class DirectionalEngine:
         # Build executor
         self.executor = Executor(kalshi_client=kalshi_client, store=self.store)
 
-        # Build tracker
+        # Build tracker — pass PM.US client so it can resolve pmus: positions
         self.tracker = Tracker(
             store=self.store,
             kalshi_client=kalshi_client,
             executor=self.executor,
             risk_manager=risk_manager,
+            pmus_client=self._pmus_client,
         )
 
         # Max hold hours for tracker (default 72)
