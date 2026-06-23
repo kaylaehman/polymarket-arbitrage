@@ -304,6 +304,14 @@ class WeatherCfg:
 
 
 
+
+@dataclass
+class PMUSWeatherCfg:
+    """Config for the PM.US weather market source in the directional maker."""
+    enabled: bool = True          # flip off via directional.pmus_weather.enabled: false
+    max_days: float = 30.0        # only fetch markets resolving within this many days
+    cache_ttl_seconds: float = 300.0  # PM.US fetch cache TTL
+
 @dataclass
 class FinancialCfg:
     """Alpha Vantage gate config for Kalshi financial markets in MakerLongshotStrategy."""
@@ -341,6 +349,7 @@ class DirectionalConfig:
     scanner: DirectionalScannerCfg = field(default_factory=DirectionalScannerCfg)
     weather: WeatherCfg = field(default_factory=WeatherCfg)
     financial: FinancialCfg = field(default_factory=FinancialCfg)
+    pmus_weather: PMUSWeatherCfg = field(default_factory=PMUSWeatherCfg)
 
 
 @dataclass
@@ -516,7 +525,8 @@ def _build_directional(data: dict) -> DirectionalConfig:
     scanner = _build_dataclass(DirectionalScannerCfg, data.get("scanner", {}) or {})
     weather = _build_dataclass(WeatherCfg, data.get("weather", {}) or {})
     financial = _build_dataclass(FinancialCfg, data.get("financial", {}) or {})
-    _sub = ("caps", "safe_compounder", "ai_directional", "maker_longshot", "scanner", "weather", "financial")
+    pmus_weather = _build_dataclass(PMUSWeatherCfg, data.get("pmus_weather", {}) or {})
+    _sub = ("caps", "safe_compounder", "ai_directional", "maker_longshot", "scanner", "weather", "financial", "pmus_weather")
     top = {k: v for k, v in data.items() if k not in _sub}
     return _build_dataclass(DirectionalConfig, {
         **top,
@@ -527,6 +537,7 @@ def _build_directional(data: dict) -> DirectionalConfig:
         "scanner": scanner,
         "weather": weather,
         "financial": financial,
+        "pmus_weather": pmus_weather,
     })
 
 

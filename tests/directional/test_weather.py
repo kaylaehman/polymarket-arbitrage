@@ -147,10 +147,9 @@ def test_forecast_margin_at_threshold():
 # ── SERIES_STATION map ────────────────────────────────────────────────────────
 
 def test_series_station_has_four_confirmed_series():
-    """Exactly the four confirmed series are present."""
-    assert set(SERIES_STATION.keys()) == {
-        "KXHIGHNY", "KXHIGHCHI", "KXHIGHLAX", "KXHIGHMIA"
-    }
+    """The four original Kalshi KXHIGH* series are present (plus PM.US pmus: entries added later)."""
+    original_kalshi = {"KXHIGHNY", "KXHIGHCHI", "KXHIGHLAX", "KXHIGHMIA"}
+    assert original_kalshi.issubset(set(SERIES_STATION.keys()))
 
 
 def test_series_station_ny_coordinates():

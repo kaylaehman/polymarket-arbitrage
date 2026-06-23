@@ -15,11 +15,13 @@ Resting maker price:
     post_price = round(no_ask - price_improvement_cents/100.0, 2)
     clamped to [0.01, 0.99]; must be strictly below no_ask to be non-marketable.
 
-Weather forecast gate (additive — only affects KXHIGH* weather candidates):
-    T-type (above-threshold): KEEP NO when forecast <= threshold - safe_margin_f.
-    B-type (bucket [lo,hi]):  KEEP NO when forecast <= lo - safe_margin_f OR
+Weather forecast gate (additive — only affects weather candidates):
+    Kalshi KXHIGH* T-type (above-threshold): KEEP NO when forecast <= threshold - safe_margin_f.
+    Kalshi KXHIGH* B-type (bucket [lo,hi]):  KEEP NO when forecast <= lo - safe_margin_f OR
                               forecast >= hi + safe_margin_f (forecast far outside
                               the 1° bucket on either side).
+    PM.US tc-temp-* (gte{N}f sentinel hi=999): KEEP when forecast <= lo - safe_margin_f.
+    PM.US tc-temp-* (bucket): delegates to bucket_gate_keep.
     Non-weather candidates pass through UNCHANGED.
 """
 from __future__ import annotations
@@ -32,13 +34,16 @@ from core.directional.models import DirectionalCandidate
 from core.directional.strategies.base import Strategy
 from core.market_data import FinancialMarket, crossing_margin, parse_financial_ticker
 from core.weather import (
+    PMUSWeatherBucket,
     WeatherBucket,
     WeatherMarket,
     bucket_gate_keep,
     forecast_high,
     forecast_margin,
     parse_bucket_ticker,
+    parse_pmus_slug,
     parse_weather_ticker,
+    pmus_bucket_gate_keep,
 )
 from kalshi_client.models import KalshiMarket
 from utils.structural_bias import structural_score
@@ -167,6 +172,29 @@ class MakerLongshotStrategy(Strategy):
         )
         return keep
 
+    async def _apply_pmus_bucket_gate(
+        self,
+        market: Any,
+        wb: PMUSWeatherBucket,
+        delta_days: float,
+        http: Any,
+    ) -> bool:
+        """Return True to KEEP the PM.US weather bucket NO candidate; False to SKIP."""
+        fc, skip_reason = await self._fetch_forecast_gated(
+            market.ticker, wb.series, wb.date, delta_days, http
+        )
+        if skip_reason is not None:
+            return False
+        if fc is None:
+            return True  # structural fallback
+
+        keep = pmus_bucket_gate_keep(fc, wb, self._weather.safe_margin_f)
+        logger.info(
+            "[weather-gate] %s: fc=%.1f pmus_bucket=[%d,%d] safe=%.1f -> %s",
+            market.ticker, fc, wb.lo, wb.hi, self._weather.safe_margin_f,
+            "KEEP" if keep else "SKIP",
+        )
+        return keep
 
     async def _apply_financial_gate(
         self,
@@ -222,9 +250,10 @@ class MakerLongshotStrategy(Strategy):
            (accepted band: min_yes_price <= yes_mid <= max_yes_price).
         3. Compute structural_score(1 - yes_mid, "NO", category); skip if < min.
         4. Fetch no_ask; skip if unavailable.
-        5. [Weather gate] If ticker parses as a KXHIGH* T-type above-threshold
-           market OR a B-type bucket market, and weather gate is enabled: apply
-           NWS forecast gate.  Non-weather candidates skip step 5 unchanged.
+        5. [Weather gate] If ticker is a PM.US pmus: prefixed weather market,
+           apply pmus_bucket_gate. If ticker parses as a KXHIGH* T-type
+           above-threshold market OR a B-type bucket market, apply NWS gate.
+           Non-weather candidates skip step 5 unchanged.
         6. Build resting post_price strictly below no_ask.
         7. Emit NO DirectionalCandidate with strategy="maker_longshot".
         """
@@ -257,23 +286,41 @@ class MakerLongshotStrategy(Strategy):
             if no_ask is None:
                 continue
 
-            # Weather forecast gate — KXHIGH* T-type (above-threshold) and B-type
+            # Weather forecast gate — KXHIGH* T-type (above-threshold), B-type, and PM.US pmus:*
             if self._weather is not None and self._weather.enabled:
                 if http is not None:
-                    wm = parse_weather_ticker(market.ticker)
-                    if wm is not None and wm.is_above_threshold:
-                        if not await self._apply_weather_gate(market, wm, delta_days, http):
-                            continue
-                    else:
-                        wb = parse_bucket_ticker(market.ticker)
-                        if wb is not None:
-                            if not await self._apply_bucket_gate(market, wb, delta_days, http):
+                    ticker = market.ticker
+                    # PM.US pmus: prefix — parse as PMUSWeatherBucket
+                    if ticker.startswith("pmus:"):
+                        slug = ticker[len("pmus:"):]
+                        wb_pmus = parse_pmus_slug(slug)
+                        if wb_pmus is not None:
+                            if not await self._apply_pmus_bucket_gate(
+                                market, wb_pmus, delta_days, http
+                            ):
                                 continue
+                    else:
+                        # Kalshi KXHIGH* tickers
+                        wm = parse_weather_ticker(ticker)
+                        if wm is not None and wm.is_above_threshold:
+                            if not await self._apply_weather_gate(market, wm, delta_days, http):
+                                continue
+                        else:
+                            wb = parse_bucket_ticker(ticker)
+                            if wb is not None:
+                                if not await self._apply_bucket_gate(market, wb, delta_days, http):
+                                    continue
                 else:
                     # No HTTP client: treat as forecast unavailable for any weather ticker
-                    wm = parse_weather_ticker(market.ticker)
-                    wb = parse_bucket_ticker(market.ticker) if wm is None else None
-                    if (wm is not None and wm.is_above_threshold) or wb is not None:
+                    ticker = market.ticker
+                    if ticker.startswith("pmus:"):
+                        wb_pmus = parse_pmus_slug(ticker[len("pmus:"):])
+                        is_weather = wb_pmus is not None
+                    else:
+                        wm = parse_weather_ticker(ticker)
+                        wb = parse_bucket_ticker(ticker) if wm is None else None
+                        is_weather = (wm is not None and wm.is_above_threshold) or wb is not None
+                    if is_weather:
                         keep = not self._weather.require_forecast
                         logger.debug(
                             "[weather-gate] %s: no http client, require_forecast=%s -> %s",

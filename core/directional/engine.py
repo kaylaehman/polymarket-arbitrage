@@ -27,6 +27,7 @@ from core.directional.strategies.maker_longshot import MakerLongshotStrategy
 from core.directional.strategies.safe_compounder import SafeCompounder
 from core.directional.tracker import Tracker
 from utils.kalshi_categories import categorize
+from core.directional.pmus_weather_source import PMUSWeatherSource
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +118,16 @@ class DirectionalEngine:
             )
         self._weather_cfg = weather_cfg
         self._financial_cfg = getattr(config, "financial", None)
+
+        # PM.US weather source — config gated (default enabled=True)
+        pmus_cfg = getattr(config, "pmus_weather", None)
+        self._pmus_source: Optional[PMUSWeatherSource] = None
+        if pmus_cfg is not None and getattr(pmus_cfg, "enabled", True):
+            self._pmus_source = PMUSWeatherSource(
+                http=None,  # http client injected per-cycle in run_once
+                max_days=getattr(pmus_cfg, "max_days", 30.0),
+                cache_ttl_seconds=getattr(pmus_cfg, "cache_ttl_seconds", 300.0),
+            )
 
         # Build decider (caps from config; cash balance = 100 placeholder without a live query)
         self.decider = Decider(
@@ -222,6 +233,24 @@ class DirectionalEngine:
         # scanner.last_liquid holds all liquid+categorized markets before the cap;
         # no additional API calls are needed since last_books is already populated.
         maker_markets = self.scanner.last_liquid if self.scanner.last_liquid else markets
+
+        # Augment maker_markets with PM.US weather markets if source is configured
+        if self._pmus_source is not None and _http_client is not None:
+            try:
+                self._pmus_source._http = _http_client
+                pmus_markets = await self._pmus_source.fetch()
+                if pmus_markets:
+                    # Build a no_ask lookup that covers both Kalshi and PM.US books
+                    kalshi_no_ask = sc_ctx["no_ask"]
+                    def _merged_no_ask(ticker: str) -> Optional[float]:
+                        if ticker.startswith("pmus:"):
+                            return self._pmus_source.no_ask(ticker)
+                        return kalshi_no_ask(ticker)
+                    sc_ctx = {**sc_ctx, "no_ask": _merged_no_ask}
+                    maker_markets = list(maker_markets) + pmus_markets
+                    logger.info("[pmus-weather] merged %d PM.US weather markets into maker universe", len(pmus_markets))
+            except Exception as exc:
+                logger.warning("[pmus-weather] source fetch failed (continuing without): %s", exc)
 
         # Build per-strategy dedup sets once per cycle so repeated scans of the
         # same market never stack duplicate open/pending positions.

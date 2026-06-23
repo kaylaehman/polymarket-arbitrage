@@ -84,6 +84,83 @@ class WeatherBucket:
     hi: int       # upper bound of bucket (inclusive), e.g. 79
 
 
+@dataclass(frozen=True)
+class PMUSWeatherBucket:
+    """Parsed representation of a PM.US tc-temp-* weather market slug.
+
+    hi=999 is a sentinel meaning gte-only (no upper bound).
+    """
+
+    series: str   # e.g. "pmus:nyc"
+    slug: str     # original PM.US slug
+    date: date    # resolution date
+    lo: int       # lower bound (inclusive), e.g. 80
+    hi: int       # upper bound (inclusive), or 999 for gte-only
+
+
+# PM.US tc-temp-* slug regex
+_PMUS_SLUG_RE = re.compile(
+    r"^tc-temp-([a-z]+)high-(\d{4})-(\d{2})-(\d{2})-((?:gte\d+lt\d+|lt\d+|gte\d+)f)$",
+    re.IGNORECASE,
+)
+
+_PMUS_BUCKET_GTE_LT = re.compile(r"^gte(\d+)lt(\d+)f$", re.IGNORECASE)
+_PMUS_BUCKET_LT = re.compile(r"^lt(\d+)f$", re.IGNORECASE)
+_PMUS_BUCKET_GTE = re.compile(r"^gte(\d+)f$", re.IGNORECASE)
+
+PMUS_CITY_SERIES: dict[str, str] = {
+    "nyc": "pmus:nyc",
+    "mdw": "pmus:mdw",
+    "lax": "pmus:lax",
+    "mia": "pmus:mia",
+    "sfo": "pmus:sfo",
+}
+
+
+def parse_pmus_slug(slug: str) -> Optional[PMUSWeatherBucket]:
+    """Parse a PM.US tc-temp-* slug into a PMUSWeatherBucket; None for anything else."""
+    if not slug:
+        return None
+    m = _PMUS_SLUG_RE.match(slug)
+    if m is None:
+        return None
+
+    city = m.group(1).lower()
+    series = PMUS_CITY_SERIES.get(city)
+    if series is None:
+        return None
+
+    try:
+        resolution_date = date(int(m.group(2)), int(m.group(3)), int(m.group(4)))
+    except ValueError:
+        return None
+
+    bucket_str = m.group(5)
+
+    # Try GTE_LT pattern first (most specific)
+    bm = _PMUS_BUCKET_GTE_LT.match(bucket_str)
+    if bm is not None:
+        lo = int(bm.group(1))
+        hi = int(bm.group(2)) - 1
+        return PMUSWeatherBucket(series=series, slug=slug, date=resolution_date, lo=lo, hi=hi)
+
+    # Try LT pattern
+    bm = _PMUS_BUCKET_LT.match(bucket_str)
+    if bm is not None:
+        lo = 0
+        hi = int(bm.group(1)) - 1
+        return PMUSWeatherBucket(series=series, slug=slug, date=resolution_date, lo=lo, hi=hi)
+
+    # Try GTE pattern (sentinel hi=999)
+    bm = _PMUS_BUCKET_GTE.match(bucket_str)
+    if bm is not None:
+        lo = int(bm.group(1))
+        hi = 999
+        return PMUSWeatherBucket(series=series, slug=slug, date=resolution_date, lo=lo, hi=hi)
+
+    return None
+
+
 # Approximate mid-season daily high (degF) — used ONLY to classify above/below.
 # Within +-5F of truth is sufficient; two T markets are issued per series per day.
 _SERIES_TYPICAL_HIGH: dict[str, float] = {
@@ -174,6 +251,12 @@ SERIES_STATION: dict[str, Station] = {
     "KXHIGHCHI": Station("Chicago Midway Airport, IL",  41.7868, -87.7522),
     "KXHIGHLAX": Station("Los Angeles Airport, CA",     33.9425, -118.4081),
     "KXHIGHMIA": Station("Miami International Airport", 25.7959, -80.2870),
+    # PM.US tc-temp-* series (confirmed 2026-06-22)
+    "pmus:nyc":  Station("Central Park, NY",            40.7829, -73.9654),
+    "pmus:mdw":  Station("Chicago Midway Airport, IL",  41.7868, -87.7522),
+    "pmus:lax":  Station("Los Angeles Airport, CA",     33.9425, -118.4081),
+    "pmus:mia":  Station("Miami International Airport", 25.7959, -80.2870),
+    "pmus:sfo":  Station("San Francisco Airport, CA",   37.6213, -122.3790),
 }
 
 # ---------------------------------------------------------------------------
@@ -284,3 +367,14 @@ def bucket_gate_keep(fc: float, lo: int, hi: int, safe_margin_f: float) -> bool:
       SKIP:  lo - safe_margin_f < fc < hi + safe_margin_f  (forecast near/inside bucket)
     """
     return fc <= lo - safe_margin_f or fc >= hi + safe_margin_f
+
+
+def pmus_bucket_gate_keep(fc: float, wb: PMUSWeatherBucket, safe_margin_f: float) -> bool:
+    """Return True (KEEP the NO bet) for a PM.US weather bucket NO candidate.
+
+    For hi=999 sentinel (gte{N}f above-threshold): KEEP when fc <= lo - safe_margin_f.
+    For all other buckets: delegates to bucket_gate_keep.
+    """
+    if wb.hi == 999:
+        return fc <= wb.lo - safe_margin_f
+    return bucket_gate_keep(fc, wb.lo, wb.hi, safe_margin_f)
