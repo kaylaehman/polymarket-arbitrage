@@ -12,6 +12,15 @@ Pipeline:
                "MULTIGAME"/"MULTIMARKET").  Cache the flat universe for
                ``cache_ttl_seconds``.
 
+1b. PRIORITY SERIES — for each series in ``priority_series`` (weather + validated
+               macro), enumerate currently-OPEN markets via the series-scoped
+               endpoint (``?series_ticker=S&status=open``), keeping those that
+               close within ``max_days_to_resolution``.  These are MERGED into the
+               universe (dedup by ticker against step 1), so the existing /events
+               universe is unchanged.  Backtest finding: 83 % of longshot edge sits
+               in KXHIGHNY and similar series that the /events endpoint rarely
+               surfaces because it's dominated by KXMV parlays + long-dated politics.
+
 2. INTERLEAVE — before probing, interleave near-term markets (close_time ≤
                ``near_term_days`` from now) at the front of the candidate list.
                This prevents the probe cap from being dominated by whatever
@@ -36,6 +45,7 @@ not return volume data either).
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from datetime import datetime, timezone
@@ -64,6 +74,29 @@ DEFAULT_NEAR_TERM_DAYS = 90
 
 # Max near-term candidates injected at the front of the probe list.
 DEFAULT_NEAR_TERM_CAP = 150
+
+# Priority-series fetch: pacing between series API calls (seconds).
+# Avoids 429s when fetching many series sequentially.
+PRIORITY_SERIES_PACE_SECONDS = 0.5
+
+# Backtest-validated priority series.  The /events endpoint is dominated by
+# KXMV parlays and long-dated politics; these series are where the 115-trade
+# backtest found 83 % of longshot edge.  Configurable via
+# ``directional.scanner.priority_series`` in config.yaml.
+DEFAULT_PRIORITY_SERIES: List[str] = [
+    # Weather: daily-high temperature markets — KXHIGHNY is the dominant edge source
+    "KXHIGHNY",   # New York daily high temperature
+    "KXHIGHCHI",  # Chicago daily high temperature
+    "KXHIGHLAX",  # Los Angeles daily high temperature
+    "KXHIGHMIA",  # Miami daily high temperature
+    # Macro / economic releases — backtest-validated multi-day longshot series
+    "KXCPI",          # US CPI month-on-month
+    "KXCPIYOY",       # US CPI year-on-year
+    "KXCPICORE",      # US Core CPI
+    "KXPCECORE",      # US Core PCE
+    "KXGDP",          # US GDP
+    "KXFEDDECISION",  # FOMC rate decision
+]
 
 # Parlay ticker prefixes/substrings to exclude.
 _PARLAY_PREFIX = "KXMV"
@@ -143,6 +176,8 @@ class KalshiMarketScanner:
         probe_limit: int = DEFAULT_PROBE_LIMIT,
         near_term_days: int = DEFAULT_NEAR_TERM_DAYS,
         near_term_cap: int = DEFAULT_NEAR_TERM_CAP,
+        priority_series: Optional[List[str]] = None,
+        priority_series_max_days: float = 30.0,
     ) -> None:
         self._client = kalshi_client
         self._categorize = categorize_fn
@@ -154,6 +189,17 @@ class KalshiMarketScanner:
         self._probe_limit = probe_limit
         self._near_term_days = near_term_days
         self._near_term_cap = near_term_cap
+
+        # Priority series: backtest-validated series where the /events endpoint
+        # rarely surfaces markets (weather, macro).  Enumerated directly via the
+        # series-scoped endpoint and merged into the universe before interleaving.
+        self._priority_series: List[str] = (
+            list(priority_series) if priority_series is not None else list(DEFAULT_PRIORITY_SERIES)
+        )
+        # Only include priority-series markets closing within this many days.
+        # Mirrors maker_longshot.max_days_to_resolution so weather/macro longshots
+        # that are too far out are excluded at fetch time.
+        self._priority_series_max_days: float = priority_series_max_days
 
         # Universe cache (flat KalshiMarket list from /events)
         self._cached_universe: List[KalshiMarket] = []
@@ -235,6 +281,94 @@ class KalshiMarketScanner:
         logger.info("[scanner] Universe: %d non-parlay markets from /events", len(markets))
         return markets
 
+    async def _fetch_priority_series_markets(
+        self, existing_tickers: set
+    ) -> List[KalshiMarket]:
+        """Enumerate OPEN markets for each priority series and return novel entries.
+
+        Uses the authenticated KalshiClient's list_markets / _get path (mirrors
+        backtest/collect.py's approach for settled markets, adapted for open ones).
+        Only markets closing within ``_priority_series_max_days`` are kept.
+        Markets already present in ``existing_tickers`` (from /events) are skipped.
+
+        Degrades gracefully: any per-series failure is logged and skipped; the
+        /events universe is returned unchanged in that case.
+
+        Pacing: PRIORITY_SERIES_PACE_SECONDS between series calls to avoid 429s.
+        The TTL cache means this runs at most once per cache_ttl_seconds.
+        """
+        if not self._priority_series:
+            return []
+
+        now_utc = datetime.now(timezone.utc)
+        cutoff_days = self._priority_series_max_days
+        novel: List[KalshiMarket] = []
+        seen_new: set = set()
+
+        for i, series in enumerate(self._priority_series):
+            if i > 0:
+                await asyncio.sleep(PRIORITY_SERIES_PACE_SECONDS)
+            try:
+                markets = await self._fetch_open_markets_for_series(series)
+            except Exception as exc:
+                logger.warning(
+                    "[scanner] priority series %s: fetch failed, skipping: %s", series, exc
+                )
+                continue
+
+            added = 0
+            for m in markets:
+                if m.ticker in existing_tickers or m.ticker in seen_new:
+                    continue
+                if _is_parlay(m.ticker):
+                    continue
+                ct = getattr(m, "close_time", None)
+                if ct is not None:
+                    try:
+                        days = (ct - now_utc).days
+                        if not (0 <= days <= cutoff_days):
+                            continue
+                    except Exception:
+                        pass
+                seen_new.add(m.ticker)
+                novel.append(m)
+                added += 1
+
+            if added:
+                logger.info(
+                    "[scanner] priority series %s: +%d novel open markets within %dd",
+                    series, added, int(cutoff_days),
+                )
+
+        logger.info(
+            "[scanner] Priority series total: %d novel markets merged into universe",
+            len(novel),
+        )
+        return novel
+
+    async def _fetch_open_markets_for_series(self, series: str) -> List[KalshiMarket]:
+        """Fetch open markets for a single series via the authenticated list_markets method.
+
+        Uses ``client.list_markets`` (mirrors backtest/collect.py's authenticated
+        path for settled markets, adapted for open ones).  If the client does not
+        expose ``list_markets`` (e.g. read-only stubs in integration tests), this
+        method returns an empty list so the caller degrades gracefully rather than
+        consuming unexpected ``_get`` pages.
+        """
+        if not hasattr(self._client, "list_markets"):
+            logger.debug(
+                "[scanner] client has no list_markets; skipping priority series %s", series
+            )
+            return []
+
+        markets, _cursor = await self._client.list_markets(
+            status="open",
+            series_ticker=series,
+            limit=200,
+            cursor=None,
+        )
+        return list(markets)
+
     def _interleave_near_term(self, universe: List[KalshiMarket]) -> List[KalshiMarket]:
         """Promote near-term markets to the front of the candidate list.
 
@@ -296,7 +430,13 @@ class KalshiMarketScanner:
             and (now - self._fetched_at) < self._cache_ttl
         )
         if not cache_valid:
-            self._cached_universe = await self._fetch_universe()
+            events_universe = await self._fetch_universe()
+            # 1b. Augment with priority series (weather + macro) that the /events
+            # endpoint rarely surfaces.  Merged here so the full pipeline (probe
+            # → liquidity → band filter → last_liquid) applies uniformly.
+            events_tickers = {m.ticker for m in events_universe}
+            priority_additions = await self._fetch_priority_series_markets(events_tickers)
+            self._cached_universe = events_universe + priority_additions
             self._fetched_at = now
 
         # 2. Interleave near-term markets to the front before applying the probe cap.

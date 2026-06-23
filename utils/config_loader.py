@@ -247,6 +247,39 @@ class MakerLongshotCfg:
 
 
 @dataclass
+class DirectionalScannerCfg:
+    """Scanner sub-config for the directional trading engine.
+
+    priority_series: backtest-validated series to enumerate directly via the
+    series-scoped API endpoint, in addition to the /events universe.  The
+    /events endpoint is dominated by KXMV parlays and long-dated politics; these
+    series are where the 115-trade backtest found ~83 % of longshot edge.
+
+    Set to an empty list to disable priority-series augmentation entirely.
+    """
+    # Weather city series confirmed to exist on Kalshi (verified against live API).
+    # Macro series validated in the 115-trade backtest.
+    priority_series: list = field(default_factory=lambda: [
+        # Daily-high temperature markets — KXHIGHNY dominant edge source
+        "KXHIGHNY",       # New York
+        "KXHIGHCHI",      # Chicago
+        "KXHIGHLAX",      # Los Angeles
+        "KXHIGHMIA",      # Miami
+        # Macro / economic release series — backtest-validated
+        "KXCPI",          # US CPI month-on-month
+        "KXCPIYOY",       # US CPI year-on-year
+        "KXCPICORE",      # US Core CPI
+        "KXPCECORE",      # US Core PCE
+        "KXGDP",          # US GDP
+        "KXFEDDECISION",  # FOMC rate decision
+    ])
+    # Maximum days to resolution for priority-series markets.  Mirrors
+    # maker_longshot.max_days_to_resolution; markets closing beyond this are
+    # excluded at fetch time (saves probes and prevents far-out wasted positions).
+    max_days_to_resolution: float = 30.0
+
+
+@dataclass
 class DirectionalConfig:
     """Directional trading mode config. Disabled by default (additive)."""
     enabled: bool = False
@@ -261,6 +294,7 @@ class DirectionalConfig:
     safe_compounder: SafeCompounderCfg = field(default_factory=SafeCompounderCfg)
     ai_directional: AiDirectionalCfg = field(default_factory=AiDirectionalCfg)
     maker_longshot: MakerLongshotCfg = field(default_factory=MakerLongshotCfg)
+    scanner: DirectionalScannerCfg = field(default_factory=DirectionalScannerCfg)
 
 
 @dataclass
@@ -433,8 +467,9 @@ def _build_directional(data: dict) -> DirectionalConfig:
     safe_compounder = _build_dataclass(SafeCompounderCfg, data.get("safe_compounder", {}) or {})
     ai_directional = _build_dataclass(AiDirectionalCfg, data.get("ai_directional", {}) or {})
     maker_longshot = _build_dataclass(MakerLongshotCfg, data.get("maker_longshot", {}) or {})
-    top = {k: v for k, v in data.items() if k not in ("caps", "safe_compounder", "ai_directional", "maker_longshot")}
-    return _build_dataclass(DirectionalConfig, {**top, "caps": caps, "safe_compounder": safe_compounder, "ai_directional": ai_directional, "maker_longshot": maker_longshot})
+    scanner = _build_dataclass(DirectionalScannerCfg, data.get("scanner", {}) or {})
+    top = {k: v for k, v in data.items() if k not in ("caps", "safe_compounder", "ai_directional", "maker_longshot", "scanner")}
+    return _build_dataclass(DirectionalConfig, {**top, "caps": caps, "safe_compounder": safe_compounder, "ai_directional": ai_directional, "maker_longshot": maker_longshot, "scanner": scanner})
 
 
 def _build_catalyst(data: dict) -> "CatalystConfig":

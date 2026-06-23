@@ -55,12 +55,19 @@ class DirectionalEngine:
         self.store = DirectionalStore(config.db_path)
         self.store.init_schema()
 
-        # Build scanner (M1: min_volume is a proper field on DirectionalConfig)
+        # Build scanner (M1: min_volume is a proper field on DirectionalConfig).
+        # Pass priority_series from config.scanner so backtest-validated weather +
+        # macro series are enumerated directly and merged into the scan universe.
+        scanner_cfg = getattr(config, "scanner", None)
+        _priority_series = list(getattr(scanner_cfg, "priority_series", []) or []) if scanner_cfg else []
+        _priority_max_days = getattr(scanner_cfg, "max_days_to_resolution", 30.0) if scanner_cfg else 30.0
         self.scanner = KalshiMarketScanner(
             kalshi_client=kalshi_client,
             categorize_fn=categorize,
             min_volume=config.min_volume,
             exclude_categories=list(config.category_exclude),
+            priority_series=_priority_series,
+            priority_series_max_days=_priority_max_days,
         )
 
         # Build strategies

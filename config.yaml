@@ -260,6 +260,32 @@ directional:
     skip_categories: []           # e.g. [Sports, Entertainment]
     max_days_to_resolution: 30    # near-term focus: tightened from 90 to 30 days
 
+  # ── Priority Series ────────────────────────────────────────────────────────
+  # The /events endpoint is dominated by KXMV parlays + long-dated politics and
+  # rarely surfaces weather or near-term macro markets.  The 115-trade backtest
+  # found ~83 % of longshot edge in KXHIGHNY and the macro series below.
+  #
+  # For each series here the scanner calls the series-scoped endpoint
+  # (?series_ticker=S&status=open), keeps markets closing within
+  # scanner.max_days_to_resolution, and MERGES them into the probe universe.
+  # The existing /events scan is UNCHANGED; this is purely additive.
+  # Set to [] to disable.
+  scanner:
+    priority_series:
+      # Weather: daily-high temperature series (city tickers confirmed on Kalshi)
+      - KXHIGHNY    # New York — dominant longshot edge source in backtest
+      - KXHIGHCHI   # Chicago
+      - KXHIGHLAX   # Los Angeles
+      - KXHIGHMIA   # Miami
+      # Macro: economic-release series validated in the 115-trade backtest
+      - KXCPI         # US CPI (month-on-month)
+      - KXCPIYOY      # US CPI (year-on-year)
+      - KXCPICORE     # US Core CPI
+      - KXPCECORE     # US Core PCE
+      - KXGDP         # US GDP
+      - KXFEDDECISION # FOMC rate decision
+    max_days_to_resolution: 30  # only include series markets closing within N days
+
 
 # ── Alerts ────────────────────────────────────────────────────────────────────
 # Push trade/kill-switch/position events to Discord and/or Telegram.

@@ -793,3 +793,197 @@ async def test_near_term_longshot_in_last_liquid_but_not_capped_result():
     assert "KXNEAR-LONGSHOT" in liquid_tickers, (
         "Near-term longshot missing from last_liquid — maker strategy would miss it"
     )
+
+
+# ---------------------------------------------------------------------------
+# Priority-series augmentation tests
+# ---------------------------------------------------------------------------
+# These tests use MockClientWithSeries which extends MockClient by also
+# implementing list_markets (the authenticated path used by the scanner to
+# enumerate priority-series open markets).
+
+from datetime import datetime, timezone, timedelta
+from kalshi_client.models import KalshiMarket as _KM
+
+
+def _km(ticker: str, series: str, days_from_now: int) -> _KM:
+    """Build a minimal KalshiMarket object as returned by list_markets."""
+    ct = datetime.now(timezone.utc) + timedelta(days=days_from_now)
+    return _KM(
+        ticker=ticker,
+        event_ticker=f"{series}-EVT",
+        series_ticker=series,
+        title=f"Priority market {ticker}",
+        subtitle="",
+        yes_price=0.0,
+        no_price=0.0,
+        status="open",
+        result=None,
+        volume=0,
+        open_interest=0,
+        close_time=ct,
+        category="",
+    )
+
+
+class MockClientWithSeries(MockClient):
+    """Extends MockClient with list_markets support for priority-series tests."""
+
+    def __init__(self, events_pages=None, ob_map=None, series_markets=None):
+        super().__init__(events_pages=events_pages, ob_map=ob_map)
+        # series_markets: dict of series_ticker -> list[KalshiMarket]
+        self._series_markets = series_markets or {}
+        self.list_markets_calls: list = []
+
+    async def list_markets(self, status=None, series_ticker=None, limit=200, cursor=None):
+        self.list_markets_calls.append({"status": status, "series_ticker": series_ticker})
+        markets = self._series_markets.get(series_ticker, [])
+        return list(markets), None  # (markets, next_cursor)
+
+
+@pytest.mark.asyncio
+async def test_priority_series_near_term_weather_in_last_liquid():
+    """A near-term in-band weather longshot from a priority series appears in last_liquid.
+
+    Setup: /events returns only far-dated politics; KXHIGHNY series returns a
+    10-day weather market with a tight two-sided book in the longshot band.
+    The scanner must merge it into the universe and expose it in last_liquid.
+    """
+    weather_ticker = "KXHIGHNY-25JUN-T78"
+
+    client = MockClientWithSeries(
+        events_pages=[_events_response("KXPOL-FAR")],
+        ob_map={
+            "KXPOL-FAR": _ob(0.40, 0.50),
+            weather_ticker: _ob(0.07, 0.12, no_ask=0.93),   # yes_mid=0.095, in-band [0.05,0.15]
+        },
+        series_markets={
+            "KXHIGHNY": [_km(weather_ticker, "KXHIGHNY", days_from_now=10)],
+        },
+    )
+    sc = KalshiMarketScanner(
+        client,
+        lambda t: "Weather",
+        min_volume=0,
+        exclude_categories=[],
+        priority_series=["KXHIGHNY"],
+        priority_series_max_days=30.0,
+    )
+    await sc.scan(max_markets=15)
+
+    liquid_tickers = {m.ticker for m in sc.last_liquid}
+    assert weather_ticker in liquid_tickers, (
+        f"Near-term weather longshot {weather_ticker} missing from last_liquid"
+    )
+
+
+@pytest.mark.asyncio
+async def test_priority_series_past_max_days_excluded():
+    """Priority-series markets past max_days_to_resolution are excluded from the universe."""
+    far_ticker = "KXHIGHNY-25DEC-T55"   # 180 days out
+
+    client = MockClientWithSeries(
+        events_pages=[_events_response()],
+        ob_map={far_ticker: _ob(0.07, 0.12)},
+        series_markets={
+            "KXHIGHNY": [_km(far_ticker, "KXHIGHNY", days_from_now=180)],
+        },
+    )
+    sc = KalshiMarketScanner(
+        client,
+        lambda t: "Weather",
+        min_volume=0,
+        exclude_categories=[],
+        priority_series=["KXHIGHNY"],
+        priority_series_max_days=30.0,
+    )
+    await sc.scan(max_markets=15)
+
+    all_tickers = {m.ticker for m in sc.last_liquid}
+    assert far_ticker not in all_tickers, (
+        "Market past max_days_to_resolution should not appear in last_liquid"
+    )
+
+
+@pytest.mark.asyncio
+async def test_priority_series_dedup_against_events():
+    """A ticker already returned by /events is not duplicated when it also appears in a priority series."""
+    shared_ticker = "KXHIGHNY-25JUN-T78"
+
+    client = MockClientWithSeries(
+        events_pages=[_events_response(shared_ticker)],
+        ob_map={shared_ticker: _ob(0.07, 0.12)},
+        series_markets={
+            "KXHIGHNY": [_km(shared_ticker, "KXHIGHNY", days_from_now=5)],
+        },
+    )
+    sc = KalshiMarketScanner(
+        client,
+        lambda t: "Weather",
+        min_volume=0,
+        exclude_categories=[],
+        priority_series=["KXHIGHNY"],
+        priority_series_max_days=30.0,
+    )
+    await sc.scan(max_markets=15)
+
+    # list_markets WAS called (series fetch ran), but the ticker appears at most once
+    assert client.list_markets_calls, "list_markets should have been called for priority series"
+    count = sum(1 for m in sc.last_liquid if m.ticker == shared_ticker)
+    assert count <= 1, f"Ticker {shared_ticker} duplicated in last_liquid (count={count})"
+
+
+@pytest.mark.asyncio
+async def test_priority_series_failed_fetch_degrades_gracefully():
+    """A failing priority-series fetch does not abort the scan; /events universe is returned."""
+
+    class FailingSeriesClient(MockClient):
+        async def list_markets(self, **kwargs):
+            raise RuntimeError("Simulated 429 / network error")
+
+    client = FailingSeriesClient(
+        events_pages=[_events_response("KXPOL-1")],
+        ob_map={"KXPOL-1": _ob(0.40, 0.50)},
+    )
+    sc = KalshiMarketScanner(
+        client,
+        lambda t: "Politics",
+        min_volume=0,
+        exclude_categories=[],
+        priority_series=["KXHIGHNY"],
+        priority_series_max_days=30.0,
+    )
+    result = await sc.scan(max_markets=15)
+
+    # /events universe still returned despite series failure
+    assert any(m.ticker == "KXPOL-1" for m in result), (
+        "Events-universe market missing after priority-series failure"
+    )
+
+
+@pytest.mark.asyncio
+async def test_priority_series_empty_list_disables_augmentation():
+    """When priority_series=[], no list_markets calls are made."""
+
+    class TrackingClient(MockClient):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.list_markets_calls: list = []
+
+        async def list_markets(self, **kwargs):
+            self.list_markets_calls.append(kwargs)
+            return [], None
+
+    client = TrackingClient(
+        events_pages=[_events_response("KXPOL-1")],
+        ob_map={"KXPOL-1": _ob(0.40, 0.50)},
+    )
+    sc = KalshiMarketScanner(
+        client,
+        lambda t: "Politics",
+        min_volume=0,
+        exclude_categories=[],
+        priority_series=[],   # disabled
+    )
+    await sc.scan(max_markets=15)
+    assert client.list_markets_calls == [], "list_markets should not be called when priority_series=[]"
