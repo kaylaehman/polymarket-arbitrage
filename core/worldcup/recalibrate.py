@@ -94,7 +94,7 @@ def load_and_recalibrate(model_path: Optional[Path] = None) -> dict[str, float]:
 
     Returns the recalibrated ratings dict (slug -> float).
     """
-    mp = model_path or (Path.home() / "wc-model")
+    mp = model_path or Path(__file__).resolve().parent
     elo_file = mp / "data" / "elo-calibrated.json"
     data = json.loads(elo_file.read_text())
     base = {k: float(v) for k, v in data["ratings"].items()}

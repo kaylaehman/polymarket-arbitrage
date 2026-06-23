@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Optional
 
 # Path to the cloned Hicruben model; override via WC_MODEL_PATH env var.
-_DEFAULT_MODEL_PATH = Path.home() / "wc-model"
+_DEFAULT_MODEL_PATH = Path(__file__).resolve().parent
 _ELO_FILE_REL = "data/elo-calibrated.json"
 
 DC_RHO = -0.13
