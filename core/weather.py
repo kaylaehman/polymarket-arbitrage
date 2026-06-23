@@ -9,10 +9,14 @@ Market types on Kalshi KXHIGH* series (confirmed 2026-06-22)
                    forecast < threshold.  This is the only type gated here.
   T<num> with "<": YES wins if high < num (COLD bet).  Not gated — we do
                    not bet NO on cold-side markets (NO = hot; same risk).
-  B<num>:          Range bucket ("78-79°").  Excluded: too narrow for the
-                   ~2-3F MAE NWS forecast to gate reliably.
+  B<num>:          Range bucket ("78-79°").  YES wins if high in [lo, hi].
+                   Semantics (confirmed 2026-06-22): B78.5 → [78, 79],
+                   i.e. lo = int(num - 0.5), hi = lo + 1 (always 1° wide).
+                   NO bet is safe only when forecast is >= safe_margin_f
+                   degrees OUTSIDE the bucket on either side.
 
-Only markets where WeatherMarket.is_above_threshold is True are forecast-gated.
+Only T-type markets where WeatherMarket.is_above_threshold is True, and
+B-type WeatherBucket markets, are forecast-gated.
 """
 from __future__ import annotations
 
@@ -28,11 +32,19 @@ logger = logging.getLogger(__name__)
 # Ticker parsing
 # ---------------------------------------------------------------------------
 
-# Matches: KXHIGHNY-26JUN23-T85  (T-type only; B-type excluded)
+# Matches: KXHIGHNY-26JUN23-T85  (T-type threshold markets)
 _TICKER_RE = re.compile(
     r"^(KXHIGH[A-Z]+)"
     r"-(\d{2})([A-Z]{3})(\d{2})"
     r"-T(\d+(?:\.\d+)?)$",
+    re.IGNORECASE,
+)
+
+# Matches: KXHIGHNY-26JUN23-B78.5  (B-type bucket markets)
+_BUCKET_RE = re.compile(
+    r"^(KXHIGH[A-Z]+)"
+    r"-(\d{2})([A-Z]{3})(\d{2})"
+    r"-B(\d+(?:\.\d+)?)$",
     re.IGNORECASE,
 )
 
@@ -57,6 +69,21 @@ class WeatherMarket:
         return self.direction == "above"
 
 
+@dataclass(frozen=True)
+class WeatherBucket:
+    """Parsed representation of a KXHIGH* B-type bucket market ticker.
+
+    Confirmed semantics (2026-06-22): B78.5 → "78-79°", i.e. lo=78, hi=79.
+    Formula: lo = int(num - 0.5), hi = lo + 1.  Always a 1° wide interval.
+    YES wins if the daily high lands in [lo, hi] inclusive.
+    """
+
+    series: str   # e.g. "KXHIGHNY"
+    date: date    # resolution date
+    lo: int       # lower bound of bucket (inclusive), e.g. 78
+    hi: int       # upper bound of bucket (inclusive), e.g. 79
+
+
 # Approximate mid-season daily high (degF) — used ONLY to classify above/below.
 # Within +-5F of truth is sufficient; two T markets are issued per series per day.
 _SERIES_TYPICAL_HIGH: dict[str, float] = {
@@ -67,12 +94,22 @@ _SERIES_TYPICAL_HIGH: dict[str, float] = {
 }
 
 
+def _parse_date_parts(yy: int, mon_str: str, dd: int) -> Optional[date]:
+    """Convert (yy, MON, dd) to a date; None if invalid."""
+    month = _MONTH_MAP.get(mon_str.upper())
+    if month is None:
+        return None
+    try:
+        return date(2000 + yy, month, dd)
+    except ValueError:
+        return None
+
+
 def parse_weather_ticker(ticker: str) -> Optional[WeatherMarket]:
     """Parse a KXHIGH* T-type ticker into a WeatherMarket; None for anything else.
 
-    B-type bucket tickers (e.g. KXHIGHNY-26JUN23-B78.5) return None intentionally:
-    bucket markets require the forecast to hit a 1-degree window which a ~2-3F MAE
-    forecast cannot gate reliably.
+    B-type bucket tickers (e.g. KXHIGHNY-26JUN23-B78.5) return None here;
+    use parse_bucket_ticker() for those.
     """
     if not ticker:
         return None
@@ -85,29 +122,40 @@ def parse_weather_ticker(ticker: str) -> Optional[WeatherMarket]:
         return None
 
     series = m.group(1).upper()
-    yy = int(m.group(2))
-    mon_str = m.group(3).upper()
-    dd = int(m.group(4))
+    resolution_date = _parse_date_parts(int(m.group(2)), m.group(3), int(m.group(4)))
+    if resolution_date is None:
+        return None
     threshold = float(m.group(5))
-
-    month = _MONTH_MAP.get(mon_str)
-    if month is None:
-        return None
-    year = 2000 + yy
-    try:
-        resolution_date = date(year, month, dd)
-    except ValueError:
-        return None
 
     typical = _SERIES_TYPICAL_HIGH.get(series, 80.0)
     direction = "above" if threshold >= typical else "below"
 
-    return WeatherMarket(
-        series=series,
-        date=resolution_date,
-        threshold=threshold,
-        direction=direction,
-    )
+    return WeatherMarket(series=series, date=resolution_date, threshold=threshold, direction=direction)
+
+
+def parse_bucket_ticker(ticker: str) -> Optional[WeatherBucket]:
+    """Parse a KXHIGH* B-type bucket ticker into a WeatherBucket; None for anything else.
+
+    Confirmed semantics (2026-06-22): B78.5 → "78-79°" bucket.
+    Formula: lo = int(num - 0.5), hi = lo + 1.
+    """
+    if not ticker:
+        return None
+
+    m = _BUCKET_RE.match(ticker)
+    if m is None:
+        return None
+
+    series = m.group(1).upper()
+    resolution_date = _parse_date_parts(int(m.group(2)), m.group(3), int(m.group(4)))
+    if resolution_date is None:
+        return None
+
+    num = float(m.group(5))
+    lo = int(num - 0.5)
+    hi = lo + 1
+
+    return WeatherBucket(series=series, date=resolution_date, lo=lo, hi=hi)
 
 
 # ---------------------------------------------------------------------------
@@ -225,3 +273,14 @@ async def forecast_high(
 def forecast_margin(fc: float, threshold: float) -> float:
     """Return fc - threshold; negative means forecast is below the hot threshold."""
     return fc - threshold
+
+
+def bucket_gate_keep(fc: float, lo: int, hi: int, safe_margin_f: float) -> bool:
+    """Return True (KEEP the NO bet) when the forecast is comfortably outside the bucket.
+
+    A NO bet on bucket [lo, hi] is safe only when the forecast is at least
+    safe_margin_f degrees away from the nearest bucket edge on either side:
+      KEEP:  fc <= lo - safe_margin_f  OR  fc >= hi + safe_margin_f
+      SKIP:  lo - safe_margin_f < fc < hi + safe_margin_f  (forecast near/inside bucket)
+    """
+    return fc <= lo - safe_margin_f or fc >= hi + safe_margin_f

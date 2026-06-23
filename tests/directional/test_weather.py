@@ -7,21 +7,31 @@ Covers:
 - parse_weather_ticker: B-type buckets return None
 - parse_weather_ticker: non-weather tickers return None
 - parse_weather_ticker: direction split (above vs below)
+- parse_bucket_ticker: B-type parses to correct [lo, hi]
+- parse_bucket_ticker: non-bucket tickers return None
+- bucket_gate_keep: KEEP/SKIP logic with examples
 - forecast_high: finds the correct isDaytime period for target date
 - forecast_high: returns None when date is beyond NWS horizon
 - forecast_high: swallows HTTP errors, never raises
 - forecast_high: returns None for unrecognised series
 - forecast_margin: arithmetic
 - WeatherCfg defaults
-- Weather gate: KEEPS NO bet at margin <= -safe_margin
-- Weather gate: SKIPS NO bet when forecast near/above threshold
-- Weather gate: SKIPS when forecast unavailable + require_forecast=True
-- Weather gate: KEEPS (structural fallback) when unavailable + require_forecast=False
-- Weather gate: SKIPS (beyond horizon) when require_forecast=True
-- Weather gate: KEEPS (structural fallback) when beyond horizon + require_forecast=False
+- Weather gate (T-type): KEEPS NO bet at margin <= -safe_margin
+- Weather gate (T-type): SKIPS NO bet when forecast near/above threshold
+- Weather gate (T-type): SKIPS when forecast unavailable + require_forecast=True
+- Weather gate (T-type): KEEPS (structural fallback) when unavailable + require_forecast=False
+- Weather gate (T-type): SKIPS (beyond horizon) when require_forecast=True
+- Weather gate (T-type): KEEPS (structural fallback) when beyond horizon + require_forecast=False
 - Weather gate: non-weather candidates pass through untouched
-- Weather gate: B-type (bucket) candidates pass through untouched (no gate)
 - Weather gate: below-threshold T-type passes through untouched (no gate on cold side)
+- Weather gate (B-type): KEEPS NO bet when forecast >= safe_margin below lo
+- Weather gate (B-type): KEEPS NO bet when forecast >= safe_margin above hi
+- Weather gate (B-type): SKIPS NO bet when forecast within safe_margin of lo
+- Weather gate (B-type): SKIPS NO bet when forecast within safe_margin of hi
+- Weather gate (B-type): SKIPS NO bet when forecast inside bucket
+- Weather gate (B-type): SKIPS when forecast unavailable + require_forecast=True
+- Weather gate (B-type): KEEPS (structural fallback) when unavailable + require_forecast=False
+- Weather gate (B-type): SKIPS when beyond horizon + require_forecast=True
 """
 from __future__ import annotations
 
@@ -31,10 +41,13 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from core.weather import (
+    WeatherBucket,
     WeatherMarket,
-    parse_weather_ticker,
+    bucket_gate_keep,
     forecast_high,
     forecast_margin,
+    parse_bucket_ticker,
+    parse_weather_ticker,
     SERIES_STATION,
     _forecast_cache,
 )
@@ -425,9 +438,15 @@ async def test_gate_non_weather_candidate_passes_through():
 
 
 @pytest.mark.asyncio
-async def test_gate_bucket_b_type_passes_through():
-    """B-type bucket markets pass through untouched (parse returns None, no gate)."""
-    cfg = _weather_cfg()
+async def test_gate_bucket_b_type_gated_when_forecast_far_below():
+    """B-type bucket market: forecast far below lo → KEEP (safe NO bet)."""
+    target = date(2026, 6, 23)
+    # B78.5 → [78, 79]; forecast=71, margin 4 → 71 <= 78-4=74 → KEEP
+    periods = _make_nws_periods(target, temp=71.0)
+    http = _make_http_mock(periods)
+    _forecast_cache.clear()
+
+    cfg = _weather_cfg(safe_margin_f=4.0)
     strategy = _make_strategy(weather_cfg=cfg)
 
     m = SimpleNamespace()
@@ -442,12 +461,8 @@ async def test_gate_bucket_b_type_passes_through():
     m.close_time = datetime.now(timezone.utc) + timedelta(days=3)
     m.to_unified_market_id = lambda: "kalshi:KXHIGHNY-26JUN23-B78.5"
 
-    http = MagicMock()
-    http.get = AsyncMock()
     candidates = await strategy.scan([m], _ctx(http=http))
-    # B-type: parse_weather_ticker returns None -> no gate -> passes through
     assert len(candidates) == 1
-    http.get.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -479,6 +494,218 @@ async def test_gate_disabled_weather_candidate_passes_through():
     candidates = await strategy.scan([m], _ctx(http=http))
     assert len(candidates) == 1
     http.get.assert_not_called()
+
+
+# ── parse_bucket_ticker ───────────────────────────────────────────────────────
+
+def test_parse_bucket_ny_b785():
+    """KXHIGHNY-26JUN23-B78.5 → [78, 79] (confirmed 2026-06-22 from Kalshi title)."""
+    wb = parse_bucket_ticker("KXHIGHNY-26JUN23-B78.5")
+    assert wb is not None
+    assert wb.series == "KXHIGHNY"
+    assert wb.date == date(2026, 6, 23)
+    assert wb.lo == 78
+    assert wb.hi == 79
+
+
+def test_parse_bucket_ny_b745():
+    """KXHIGHNY-26JUN22-B74.5 → [74, 75]."""
+    wb = parse_bucket_ticker("KXHIGHNY-26JUN22-B74.5")
+    assert wb is not None
+    assert wb.lo == 74
+    assert wb.hi == 75
+
+
+def test_parse_bucket_lax_b695():
+    """KXHIGHLAX-26JUN23-B69.5 → [69, 70]."""
+    wb = parse_bucket_ticker("KXHIGHLAX-26JUN23-B69.5")
+    assert wb is not None
+    assert wb.series == "KXHIGHLAX"
+    assert wb.lo == 69
+    assert wb.hi == 70
+
+
+def test_parse_bucket_b805():
+    """KXHIGHNY-26JUN23-B80.5 → [80, 81]."""
+    wb = parse_bucket_ticker("KXHIGHNY-26JUN23-B80.5")
+    assert wb is not None
+    assert wb.lo == 80
+    assert wb.hi == 81
+
+
+def test_parse_bucket_t_type_returns_none():
+    """T-type ticker returns None from parse_bucket_ticker."""
+    assert parse_bucket_ticker("KXHIGHNY-26JUN23-T85") is None
+
+
+def test_parse_bucket_non_weather_returns_none():
+    """Non-KXHIGH ticker returns None."""
+    assert parse_bucket_ticker("KXCPI-26JUL-B1.5") is None
+    assert parse_bucket_ticker("") is None
+    assert parse_bucket_ticker("garbage") is None
+
+
+def test_parse_bucket_case_insensitive():
+    """Bucket parse is case-insensitive."""
+    wb = parse_bucket_ticker("kxhighny-26jun23-b78.5")
+    assert wb is not None
+    assert wb.series == "KXHIGHNY"
+    assert wb.lo == 78
+
+
+# ── bucket_gate_keep ──────────────────────────────────────────────────────────
+
+def test_bucket_gate_keep_forecast_far_below_lo():
+    """bucket [78,79], fc=71, margin=4: 71 <= 78-4=74 → KEEP."""
+    assert bucket_gate_keep(71.0, 78, 79, 4.0) is True
+
+
+def test_bucket_gate_keep_forecast_exactly_at_lo_minus_margin():
+    """bucket [78,79], fc=74, margin=4: 74 <= 74 → KEEP (boundary)."""
+    assert bucket_gate_keep(74.0, 78, 79, 4.0) is True
+
+
+def test_bucket_gate_skip_forecast_within_margin_of_lo():
+    """bucket [78,79], fc=76, margin=4: 76 > 74 and 76 < 83 → SKIP."""
+    assert bucket_gate_keep(76.0, 78, 79, 4.0) is False
+
+
+def test_bucket_gate_skip_forecast_inside_bucket():
+    """bucket [78,79], fc=78, margin=4: inside bucket → SKIP."""
+    assert bucket_gate_keep(78.0, 78, 79, 4.0) is False
+
+
+def test_bucket_gate_skip_forecast_at_hi():
+    """bucket [78,79], fc=79, margin=4: inside bucket → SKIP."""
+    assert bucket_gate_keep(79.0, 78, 79, 4.0) is False
+
+
+def test_bucket_gate_skip_forecast_just_above_hi():
+    """bucket [78,79], fc=82, margin=4: 82 < 83 → SKIP (still within margin)."""
+    assert bucket_gate_keep(82.0, 78, 79, 4.0) is False
+
+
+def test_bucket_gate_keep_forecast_at_hi_plus_margin():
+    """bucket [78,79], fc=83, margin=4: 83 >= 79+4=83 → KEEP (boundary)."""
+    assert bucket_gate_keep(83.0, 78, 79, 4.0) is True
+
+
+def test_bucket_gate_keep_forecast_far_above_hi():
+    """bucket [78,79], fc=90, margin=4: 90 >= 83 → KEEP (forecast implies a hot day, NO on 78-79 is safe)."""
+    assert bucket_gate_keep(90.0, 78, 79, 4.0) is True
+
+
+# ── Weather gate (B-type) in MakerLongshotStrategy ───────────────────────────
+
+def _make_bucket_market(
+    ticker="KXHIGHNY-26JUN23-B78.5",
+    yes_price=0.08,
+    close_days=3,
+):
+    m = SimpleNamespace()
+    m.ticker = ticker
+    m.event_ticker = "-".join(ticker.split("-")[:2])
+    m.yes_price = yes_price
+    m.no_price = 1.0 - yes_price
+    m.category = "Weather"
+    m.title = "Will NYC high be 78-79F on Jun 23, 2026?"
+    m.status = "open"
+    m.result = None
+    m.close_time = datetime.now(timezone.utc) + timedelta(days=close_days)
+    m.to_unified_market_id = lambda: f"kalshi:{ticker}"
+    return m
+
+
+@pytest.mark.asyncio
+async def test_bucket_gate_keeps_when_forecast_far_below_lo():
+    """B-type NO KEPT: bucket [78,79], fc=71, margin=4 → 71<=74 → KEEP."""
+    target = date(2026, 6, 23)
+    periods = _make_nws_periods(target, temp=71.0)
+    http = _make_http_mock(periods)
+    _forecast_cache.clear()
+
+    strategy = _make_strategy(weather_cfg=_weather_cfg(safe_margin_f=4.0))
+    m = _make_bucket_market("KXHIGHNY-26JUN23-B78.5", yes_price=0.08, close_days=3)
+    candidates = await strategy.scan([m], _ctx(http=http))
+    assert len(candidates) == 1
+    assert candidates[0].side == "NO"
+
+
+@pytest.mark.asyncio
+async def test_bucket_gate_keeps_when_forecast_far_above_hi():
+    """B-type NO KEPT: bucket [78,79], fc=90, margin=4 → 90>=83 → KEEP."""
+    target = date(2026, 6, 23)
+    periods = _make_nws_periods(target, temp=90.0)
+    http = _make_http_mock(periods)
+    _forecast_cache.clear()
+
+    strategy = _make_strategy(weather_cfg=_weather_cfg(safe_margin_f=4.0))
+    m = _make_bucket_market("KXHIGHNY-26JUN23-B78.5", yes_price=0.08, close_days=3)
+    candidates = await strategy.scan([m], _ctx(http=http))
+    assert len(candidates) == 1
+
+
+@pytest.mark.asyncio
+async def test_bucket_gate_skips_when_forecast_inside_bucket():
+    """B-type NO SKIPPED: bucket [78,79], fc=78 → inside bucket → SKIP."""
+    target = date(2026, 6, 23)
+    periods = _make_nws_periods(target, temp=78.0)
+    http = _make_http_mock(periods)
+    _forecast_cache.clear()
+
+    strategy = _make_strategy(weather_cfg=_weather_cfg(safe_margin_f=4.0))
+    m = _make_bucket_market("KXHIGHNY-26JUN23-B78.5", yes_price=0.08, close_days=3)
+    candidates = await strategy.scan([m], _ctx(http=http))
+    assert candidates == []
+
+
+@pytest.mark.asyncio
+async def test_bucket_gate_skips_when_forecast_within_margin_of_lo():
+    """B-type NO SKIPPED: bucket [78,79], fc=76, margin=4 → 76 > 74 → SKIP."""
+    target = date(2026, 6, 23)
+    periods = _make_nws_periods(target, temp=76.0)
+    http = _make_http_mock(periods)
+    _forecast_cache.clear()
+
+    strategy = _make_strategy(weather_cfg=_weather_cfg(safe_margin_f=4.0))
+    m = _make_bucket_market("KXHIGHNY-26JUN23-B78.5", yes_price=0.08, close_days=3)
+    candidates = await strategy.scan([m], _ctx(http=http))
+    assert candidates == []
+
+
+@pytest.mark.asyncio
+async def test_bucket_gate_skips_when_forecast_unavailable_require_true():
+    """B-type NO SKIPPED when NWS unavailable + require_forecast=True."""
+    http = _make_http_mock(None, fail_points=True)
+    _forecast_cache.clear()
+
+    strategy = _make_strategy(weather_cfg=_weather_cfg(require_forecast=True))
+    m = _make_bucket_market("KXHIGHNY-26JUN23-B78.5", yes_price=0.08, close_days=3)
+    candidates = await strategy.scan([m], _ctx(http=http))
+    assert candidates == []
+
+
+@pytest.mark.asyncio
+async def test_bucket_gate_keeps_structural_fallback_when_unavailable_require_false():
+    """B-type NO KEPT (structural fallback) when NWS unavailable + require_forecast=False."""
+    http = _make_http_mock(None, fail_points=True)
+    _forecast_cache.clear()
+
+    strategy = _make_strategy(weather_cfg=_weather_cfg(require_forecast=False))
+    m = _make_bucket_market("KXHIGHNY-26JUN23-B78.5", yes_price=0.08, close_days=3)
+    candidates = await strategy.scan([m], _ctx(http=http))
+    assert len(candidates) == 1
+
+
+@pytest.mark.asyncio
+async def test_bucket_gate_skips_beyond_horizon_require_true():
+    """B-type NO SKIPPED when beyond forecast_horizon_days + require_forecast=True."""
+    strategy = _make_strategy(
+        weather_cfg=_weather_cfg(forecast_horizon_days=7, require_forecast=True)
+    )
+    m = _make_bucket_market("KXHIGHNY-26JUN23-B78.5", yes_price=0.08, close_days=10)
+    candidates = await strategy.scan([m], _ctx(http=MagicMock()))
+    assert candidates == []
 
 
 # ── WeatherCfg defaults ───────────────────────────────────────────────────────
