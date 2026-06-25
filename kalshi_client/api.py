@@ -755,7 +755,10 @@ class KalshiClient:
             return None
         
         market = self._parse_market(data["market"])
-        if market:
+        # Only cache RESOLVED markets — they are immutable. Caching an OPEN market
+        # (result=None) with no TTL serves stale data forever and prevents the
+        # tracker from ever seeing resolution (positions stuck open, P&L never books).
+        if market and market.result is not None:
             self._markets_cache[ticker] = market
         return market
     
