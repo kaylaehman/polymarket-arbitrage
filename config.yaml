@@ -238,10 +238,10 @@ directional:
   category_exclude: []            # e.g. [Weather, Esports]
 
   caps:
-    total_exposure: 200           # max total USD across all open directional positions (paper $ governor; raised 100->200 2026-06-29 so weather has room past the macro-clogged book)
+    total_exposure: 100000        # paper cap REMOVED 2026-06-29 (per user: maximize sample count to validate accuracy faster; PAPER/dry_run so no real-money risk)
     max_position: 8               # max USD per individual position
-    max_open: 1000                # global count cap effectively OFF — per-bucket caps below govern
-    max_open_longshot: 4          # cap # of slow non-daily (longshot: macro/cable) bets; DAILY (weather) bets are UNCAPPED on count (per user 2026-06-29)
+    max_open: 100000              # count cap off
+    max_open_longshot: 100000     # longshot bucket cap off too — accumulate macro/cable/sports samples as fast as weather
 
   safe_compounder:
     mode: paper                   # paper | live (live requires enabled: true above)
