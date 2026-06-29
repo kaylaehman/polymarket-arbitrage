@@ -136,9 +136,11 @@ class Tracker:
 
         # Sweep open positions (resolution + AI exit logic)
         positions = self._store.open_positions()
+        resolved = 0
         for pos in positions:
             closed = await self._check_resolution(pos)
             if closed:
+                resolved += 1
                 continue
 
             if pos.strategy in _AI_STRATEGIES:
@@ -148,6 +150,14 @@ class Tracker:
         pending = self._store.pending_positions()
         for pos in pending:
             await self._check_pending_maker(pos, now, order_ttl_minutes)
+
+        # Visibility: log every sweep so "no resolved alerts" can be distinguished
+        # from "sweep not running". Settle alerts fire from _check_resolution above.
+        logger.info(
+            "[tracker] sweep: %d open + %d pending checked, %d resolved this cycle%s",
+            len(positions), len(pending), resolved,
+            " (settle alerts sent)" if resolved else "",
+        )
 
     # ──────────────────────────────────────────────────────────────────────────
 
