@@ -503,8 +503,10 @@ async def test_tracker_maker_resolves_settles_pnl(tmp_path):
     assert len(store.open_positions()) == 0
     summary = store.pnl_summary()
     assert summary["closed_count"] == 1
-    # P&L = (1.0 - 0.93) * 5 = 0.35
-    assert abs(summary["total_realized_pnl"] - 0.35) < 1e-6
+    # P&L net of the Kalshi entry fee: (1.0 - 0.93)*5 - fee_per_contract(0.93)*5
+    from core.kalshi_fees import fee_per_contract
+    expected = (1.0 - 0.93) * 5 - fee_per_contract(0.93) * 5
+    assert abs(summary["total_realized_pnl"] - expected) < 1e-6
 
 
 async def test_tracker_strips_venue_prefix_before_get_market(tmp_path):

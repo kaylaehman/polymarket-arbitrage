@@ -33,6 +33,7 @@ from typing import Any, Optional
 from core.directional.models import DirectionalCandidate
 from core.directional.strategies.base import Strategy
 from core.market_data import FinancialMarket, crossing_margin, parse_financial_ticker
+from core.macro_data import parse_macro_ticker, macro_threshold_keep, macro_bucket_keep
 from core.weather import (
     PMUSWeatherBucket,
     WeatherBucket,
@@ -77,6 +78,7 @@ class MakerLongshotStrategy(Strategy):
         max_days_to_resolution: float = 90.0,
         weather_cfg: Optional[Any] = None,
         financial_cfg: Optional[Any] = None,
+        macro_cfg: Optional[Any] = None,
     ) -> None:
         self._min_score = min_structural_score
         self._min_yes = min_yes_price
@@ -86,6 +88,7 @@ class MakerLongshotStrategy(Strategy):
         self._max_days = max_days_to_resolution
         self._weather = weather_cfg  # WeatherCfg | None
         self._financial = financial_cfg  # FinancialCfg | None
+        self._macro = macro_cfg  # MacroCfg | None
 
     @property
     def name(self) -> str:
@@ -237,6 +240,34 @@ class MakerLongshotStrategy(Strategy):
         )
         return keep
 
+    async def _apply_macro_gate(self, market, mm, delta_days: float, ctx: dict) -> bool:
+        """Return True to KEEP a macro NO candidate; False to SKIP. Mirrors the
+        financial gate but uses a Fed nowcast + per-indicator σ."""
+        cfg = self._macro
+        client = ctx.get("macro")
+        if delta_days > cfg.horizon_days:
+            return not cfg.require_data
+        if client is None:
+            return not cfg.require_data
+        nowcast = await client.nowcast(mm.indicator)
+        if nowcast is None:
+            keep = not cfg.require_data
+            logger.debug("[macro-gate] %s: no nowcast, require_data=%s -> %s",
+                         market.ticker, cfg.require_data, "KEEP" if keep else "SKIP")
+            return keep
+        sigma = float(cfg.sigma.get(mm.indicator, 0.0))
+        if mm.market_type == "bucket" and mm.bucket_hi is not None:
+            keep = macro_bucket_keep(nowcast, mm.bucket_lo, mm.bucket_hi, sigma, cfg.min_sigma)
+        elif mm.market_type == "bucket":
+            # single-sided bucket (lo only): treat like a threshold floor
+            keep = macro_threshold_keep(nowcast, sigma, mm.bucket_lo, cfg.min_sigma)
+        else:
+            keep = macro_threshold_keep(nowcast, sigma, mm.threshold, cfg.min_sigma)
+        logger.info("[macro-gate] %s: nowcast=%.3f thr=%.3f sigma=%.3f min_sigma=%.1f -> %s",
+                    market.ticker, nowcast, mm.threshold, sigma, cfg.min_sigma,
+                    "KEEP" if keep else "SKIP")
+        return keep
+
     async def scan(
         self,
         markets: list[KalshiMarket],
@@ -335,6 +366,13 @@ class MakerLongshotStrategy(Strategy):
                 fm = parse_financial_ticker(market.ticker)
                 if fm is not None and fm.market_type == "threshold" and fm.direction == "above":
                     if not await self._apply_financial_gate(market, fm, delta_days, ctx):
+                        continue
+
+            # Macro nowcast gate — KXCPI*/KXCPIYOY*/KXCPICORE*/KXPCECORE*/KXGDP*
+            if self._macro is not None and self._macro.enabled:
+                mm = parse_macro_ticker(market.ticker)
+                if mm is not None:
+                    if not await self._apply_macro_gate(market, mm, delta_days, ctx):
                         continue
 
             # Build non-marketable resting bid: strictly < no_ask
