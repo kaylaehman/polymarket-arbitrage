@@ -11,6 +11,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass
+from datetime import date
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -79,6 +80,21 @@ def parse_macro_ticker(ticker: str) -> Optional[MacroMarket]:
     return MacroMarket(series, indicator, threshold, "above", "threshold")
 
 
+def cpi_yoy_nowcast(latest_index: float, prior_year_index: Optional[float],
+                    mom_nowcast_pct: float) -> Optional[float]:
+    """Year-over-year CPI nowcast for the upcoming release.
+
+    Projects the latest CPI index forward one month by the Cleveland Fed MoM
+    nowcast, then compares to the index 12 months before the release month:
+        YoY% = (latest * (1 + mom/100)) / index_12mo_before_release - 1) * 100
+    Returns None on a degenerate prior index.
+    """
+    if prior_year_index is None or prior_year_index <= 0:
+        return None
+    projected = latest_index * (1.0 + mom_nowcast_pct / 100.0)
+    return (projected / prior_year_index - 1.0) * 100.0
+
+
 def macro_margin(nowcast: float, sigma: float, threshold: float) -> float:
     """z-score: how many σ the threshold sits above the nowcast.
 
@@ -121,7 +137,9 @@ class MacroNowcastClient:
             return hit[1]
         if indicator == "GDP":
             val = await self._fred("GDPNOW")
-        elif indicator in ("CPI", "CPIYOY", "CPICORE"):
+        elif indicator == "CPIYOY":
+            val = await self._cpiyoy()
+        elif indicator in ("CPI", "CPICORE"):
             val = await self._cleveland(_CLEVELAND_CPI_URL, indicator)
         elif indicator == "PCECORE":
             val = await self._cleveland(_CLEVELAND_PCE_URL, indicator)
@@ -144,6 +162,50 @@ class MacroNowcastClient:
         except Exception as exc:  # noqa: BLE001
             logger.warning("[macro] FRED %s error: %s", series_id, exc)
             return None
+
+    async def _fred_observations(self, series_id: str, limit: int = 16) -> list:
+        """Return recent FRED observations (list of {date, value}); [] on error."""
+        if not self._fred_key:
+            return []
+        try:
+            resp = await self._http.get(_FRED_BASE, params={
+                "series_id": series_id, "api_key": self._fred_key,
+                "file_type": "json", "sort_order": "desc", "limit": limit,
+            })
+            resp.raise_for_status()
+            return resp.json().get("observations", []) or []
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[macro] FRED %s observations error: %s", series_id, exc)
+            return []
+
+    async def _cpiyoy(self) -> Optional[float]:
+        """Assemble the year-over-year CPI nowcast from FRED CPIAUCSL history
+        (latest index + the index 12 months before the next release month) and the
+        Cleveland Fed MoM CPI nowcast. None until the MoM nowcast is in-window."""
+        obs = await self._fred_observations("CPIAUCSL", 16)
+        parsed: list[tuple[date, float]] = []
+        for o in obs:
+            try:
+                parsed.append((date.fromisoformat(o["date"]), float(o["value"])))
+            except (KeyError, ValueError, TypeError):
+                continue
+        if not parsed:
+            return None
+        parsed.sort()
+        latest_date, latest_index = parsed[-1]
+        # The next release covers the month AFTER the latest published index.
+        rel_month = 1 if latest_date.month == 12 else latest_date.month + 1
+        rel_year = latest_date.year + (1 if latest_date.month == 12 else 0)
+        prior_index = next(
+            (v for (d, v) in parsed if d.year == rel_year - 1 and d.month == rel_month),
+            None,
+        )
+        if prior_index is None:
+            return None
+        mom = await self._cleveland(_CLEVELAND_CPI_URL, "CPI")  # MoM CPI nowcast
+        if mom is None:
+            return None
+        return cpi_yoy_nowcast(latest_index, prior_index, mom)
 
     async def _cleveland(self, url: str, indicator: str) -> Optional[float]:
         if not url:

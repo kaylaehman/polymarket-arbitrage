@@ -100,3 +100,45 @@ def test_parse_cleveland_core_cpi():
 def test_parse_cleveland_cpiyoy_unavailable_returns_none():
     # CPIYOY has no MoM series -> None (gate safely skips)
     assert _parse_cleveland_nowcast(_cleveland_resp(None), "CPIYOY") is None
+
+
+# ── CPIYOY year-over-year nowcast (assembled from FRED index + Cleveland MoM) ──
+from core.macro_data import cpi_yoy_nowcast
+
+def test_cpi_yoy_nowcast_math():
+    # latest CPI index 320.0, MoM nowcast +0.3% -> projected 320.96;
+    # index 12 months before the release month = 310.0 -> YoY = (320.96/310 - 1)*100
+    yoy = cpi_yoy_nowcast(latest_index=320.0, prior_year_index=310.0, mom_nowcast_pct=0.3)
+    assert yoy == pytest.approx((320.0 * 1.003 / 310.0 - 1.0) * 100.0, rel=1e-9)
+
+def test_cpi_yoy_nowcast_zero_prior_is_safe():
+    # degenerate prior index -> None-safe upstream; function guards div-by-zero
+    assert cpi_yoy_nowcast(320.0, 0.0, 0.3) is None
+
+
+@pytest.mark.asyncio
+async def test_cpiyoy_nowcast_assembled(monkeypatch):
+    """nowcast('CPIYOY') assembles FRED CPIAUCSL history + Cleveland MoM."""
+    from core.macro_data import MacroNowcastClient
+    import core.macro_data as md
+    # FRED CPIAUCSL: latest 2026-05 = 320.0, 2025-06 (12mo before June release) = 310.0
+    fred_obs = {"observations": [
+        {"date": "2025-05-01", "value": "309.0"},
+        {"date": "2025-06-01", "value": "310.0"},
+        {"date": "2026-04-01", "value": "319.0"},
+        {"date": "2026-05-01", "value": "320.0"},
+    ]}
+    cleveland = [{"dataset": [{"seriesname": "CPI Inflation",
+                              "data": [{"value": "0.30"}]}]}]
+    def _resp(j):
+        r = MagicMock(); r.json = MagicMock(return_value=j); r.raise_for_status = MagicMock()
+        return r
+    async def fake_get(url, params=None):
+        if "stlouisfed" in url:
+            return _resp(fred_obs)
+        return _resp(cleveland)
+    http = MagicMock(); http.get = AsyncMock(side_effect=fake_get)
+    c = MacroNowcastClient(http=http, fred_api_key="k")
+    val = await c.nowcast("CPIYOY")
+    # release month = 2026-06; prior = 2025-06 = 310.0; latest = 320.0; mom 0.30
+    assert val == pytest.approx((320.0 * 1.003 / 310.0 - 1.0) * 100.0, rel=1e-6)
