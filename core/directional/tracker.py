@@ -48,6 +48,7 @@ from typing import Optional
 
 from core.directional.models import DirectionalPosition
 from core.kalshi_fees import fee_per_contract
+from music_intel.sources.markets import gamma_resolution
 from polymarket_client.models import OrderStatus
 
 logger = logging.getLogger(__name__)
@@ -115,12 +116,13 @@ def should_exit(
 class Tracker:
     """Sweep open directional positions and apply exit rules."""
 
-    def __init__(self, store, kalshi_client, executor, risk_manager, pmus_client=None) -> None:
+    def __init__(self, store, kalshi_client, executor, risk_manager, pmus_client=None, gamma_http=None) -> None:
         self._store = store
         self._client = kalshi_client
         self._executor = executor
         self._risk = risk_manager
         self._pmus_client = pmus_client
+        self._gamma_http = gamma_http
 
     async def sweep(
         self,
@@ -194,6 +196,9 @@ class Tracker:
         mid = pos.market_id
         if mid.startswith("pmus:"):
             return await self._check_pmus_resolution(pos)
+
+        if mid.startswith("pm:"):
+            return await self._check_pm_resolution(pos)
 
         # Strip the venue prefix: market_id is "kalshi:<ticker>" but get_market
         # expects the bare ticker. Without this, resolution NEVER fires.
@@ -284,6 +289,36 @@ class Tracker:
             result,
             pos.side,
             realized_pnl,
+        )
+        self._alert_settled(pos, realized_pnl)
+        return True
+
+    async def _check_pm_resolution(self, pos: DirectionalPosition) -> bool:
+        """Settle a pm: (Polymarket music) position via Gamma resolution.
+
+        "yes"/"no" = which named binary outcome won. Never raises.
+        """
+        if self._gamma_http is None:
+            return False
+        try:
+            result = await gamma_resolution(self._gamma_http, pos.market_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("gamma_resolution failed for %s: %s", pos.market_id, exc)
+            return False
+        if result == "yes":
+            resolution_price = 1.0 if pos.side == "YES" else 0.0
+        elif result == "no":
+            resolution_price = 1.0 if pos.side == "NO" else 0.0
+        else:
+            return False
+        realized_pnl = settlement_pnl(pos.entry_price, pos.size, resolution_price)
+        self._store.update_position(
+            pos.market_id, status="closed", realized_pnl=realized_pnl,
+            closed_at=datetime.now(timezone.utc).isoformat(),
+        )
+        logger.info(
+            "Resolved %s %s side=%s pnl=%.4f (music)",
+            pos.market_id, result, pos.side, realized_pnl,
         )
         self._alert_settled(pos, realized_pnl)
         return True
