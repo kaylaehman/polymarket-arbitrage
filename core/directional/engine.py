@@ -157,6 +157,25 @@ class DirectionalEngine:
                 min_refresh_seconds=getattr(mp_cfg, "min_refresh_seconds", 1800.0),
             ), mp_cfg))
 
+        # Artist paper strategy — bets the liquid Polymarket "Top Spotify Artist
+        # {year}" market from a YTD+rate projection. Shares the music http client
+        # (kworb + Spotify + Gamma). PAPER only; settles via the pm: tracker path.
+        ap_cfg = getattr(config, "artist_paper", None)
+        if ap_cfg is not None and getattr(ap_cfg, "enabled", False):
+            if self._music_http is None:
+                from music_intel.config import MusicIntelConfig
+                self._music_http = httpx.AsyncClient(
+                    headers={"User-Agent": MusicIntelConfig().user_agent},
+                    timeout=30.0, follow_redirects=True)
+            from core.directional.strategies.artist_paper import ArtistPaperStrategy
+            from music_intel.sources.spotify import SpotifyClient
+            self._strategies.append((ArtistPaperStrategy(
+                http=self._music_http, spotify_client=SpotifyClient(http=self._music_http),
+                year=getattr(ap_cfg, "year", "2026"), min_edge=getattr(ap_cfg, "min_edge", 0.10),
+                max_contenders=getattr(ap_cfg, "max_contenders", 12),
+                min_refresh_seconds=getattr(ap_cfg, "min_refresh_seconds", 86400.0),
+            ), ap_cfg))
+
         self._weather_cfg = weather_cfg
         self._financial_cfg = getattr(config, "financial", None)
         self._macro_cfg = getattr(config, "macro", None)
@@ -372,6 +391,9 @@ class DirectionalEngine:
                 strategy_markets = maker_markets
             elif strategy.name == "music_paper":
                 ctx = {}            # runs the music engine itself; ignores Kalshi markets
+                strategy_markets = []
+            elif strategy.name == "artist_paper":
+                ctx = {}            # runs its own pipeline; ignores Kalshi markets
                 strategy_markets = []
             else:
                 ctx = {}  # AiDirectional needs no extra ctx

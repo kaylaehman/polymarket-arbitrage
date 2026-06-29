@@ -38,7 +38,7 @@ def kelly_fraction(
     enough (>= 0.6); otherwise it falls back to the market-implied probability
     nudged by the edge, so a low-confidence signal can't distort sizing.
     """
-    if confidence >= 0.6:
+    if (confidence or 0.0) >= 0.6:
         p = ai_probability
     else:
         p = yes_price + edge
