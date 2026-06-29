@@ -77,6 +77,7 @@ class DirectionalEngine:
             exclude_categories=list(config.category_exclude),
             priority_series=_priority_series,
             priority_series_max_days=_priority_max_days,
+            priority_series_sports_max_days=getattr(scanner_cfg, "priority_series_sports_max_days", 30.0),
         )
 
         # Build strategies

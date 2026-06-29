@@ -287,6 +287,9 @@ class DirectionalScannerCfg:
     # maker_longshot.max_days_to_resolution; markets closing beyond this are
     # excluded at fetch time (saves probes and prevents far-out wasted positions).
     max_days_to_resolution: float = 30.0
+    # Sports championship futures (KXNBA, KXNHL, KXMLBWS) resolve months out;
+    # they get this extended horizon when the season is active.
+    priority_series_sports_max_days: float = 30.0
 
 
 @dataclass

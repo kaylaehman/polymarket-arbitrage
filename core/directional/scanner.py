@@ -105,6 +105,23 @@ DEFAULT_PRIORITY_SERIES: List[str] = [
 _PARLAY_PREFIX = "KXMV"
 _PARLAY_SUBSTRINGS = ("MULTIGAME", "MULTIMARKET")
 
+# Sports-championship futures series that get the extended scan horizon.
+_SPORTS_FUTURE_PREFIXES = ("KXNBA", "KXNHL", "KXMLBWS")
+
+
+def _within_horizon(series_ticker, close_time, *, default_days, sports_days):
+    """Sports championship futures get the longer horizon; everything else the default."""
+    import datetime as _dt
+    if close_time is None:
+        return False
+    now = _dt.datetime.now(_dt.timezone.utc)
+    ct = close_time if close_time.tzinfo else close_time.replace(tzinfo=_dt.timezone.utc)
+    days = (ct - now).total_seconds() / 86400.0
+    if days < 0:
+        return False
+    limit = sports_days if series_ticker.upper().startswith(_SPORTS_FUTURE_PREFIXES) else default_days
+    return days <= limit
+
 
 def _is_parlay(ticker: str) -> bool:
     t = ticker.upper()
@@ -181,6 +198,7 @@ class KalshiMarketScanner:
         near_term_cap: int = DEFAULT_NEAR_TERM_CAP,
         priority_series: Optional[List[str]] = None,
         priority_series_max_days: float = 30.0,
+        priority_series_sports_max_days: float = 30.0,
     ) -> None:
         self._client = kalshi_client
         self._categorize = categorize_fn
@@ -203,6 +221,8 @@ class KalshiMarketScanner:
         # Mirrors maker_longshot.max_days_to_resolution so weather/macro longshots
         # that are too far out are excluded at fetch time.
         self._priority_series_max_days: float = priority_series_max_days
+        # Sports championship futures get this longer horizon (season-length).
+        self._priority_series_sports_max_days: float = priority_series_sports_max_days
 
         # Universe cache (flat KalshiMarket list from /events)
         self._cached_universe: List[KalshiMarket] = []
@@ -303,8 +323,6 @@ class KalshiMarketScanner:
         if not self._priority_series:
             return []
 
-        now_utc = datetime.now(timezone.utc)
-        cutoff_days = self._priority_series_max_days
         novel: List[KalshiMarket] = []
         seen_new: set = set()
 
@@ -325,22 +343,21 @@ class KalshiMarketScanner:
                     continue
                 if _is_parlay(m.ticker):
                     continue
-                ct = getattr(m, "close_time", None)
-                if ct is not None:
-                    try:
-                        days = (ct - now_utc).days
-                        if not (0 <= days <= cutoff_days):
-                            continue
-                    except Exception:
-                        pass
+                if not _within_horizon(
+                    series,
+                    getattr(m, "close_time", None),
+                    default_days=self._priority_series_max_days,
+                    sports_days=self._priority_series_sports_max_days,
+                ):
+                    continue
                 seen_new.add(m.ticker)
                 novel.append(m)
                 added += 1
 
             if added:
                 logger.info(
-                    "[scanner] priority series %s: +%d novel open markets within %dd",
-                    series, added, int(cutoff_days),
+                    "[scanner] priority series %s: +%d novel open markets (horizon default=%dd sports=%dd)",
+                    series, added, int(self._priority_series_max_days), int(self._priority_series_sports_max_days),
                 )
 
         logger.info(
