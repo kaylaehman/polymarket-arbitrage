@@ -416,7 +416,7 @@ directional:
     year: "2026"
     min_edge: 0.10
     max_contenders: 12
-    min_refresh_seconds: 86400
+    min_refresh_seconds: 3600
 
 
 # ── Alerts ────────────────────────────────────────────────────────────────────

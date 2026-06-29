@@ -90,6 +90,7 @@ class ArtistPaperStrategy(Strategy):
         # Step 2: discover markets
         outcomes = await discover_top_artist_markets(self._http, self._year)
         if not outcomes:
+            logger.info("[artist_paper] no Top-Spotify-Artist market discovered for %s", self._year)
             return []
 
         # Step 3: gather stream data
@@ -122,6 +123,13 @@ class ArtistPaperStrategy(Strategy):
 
         # Step 8: detect edges
         edges = compute_artist_edges(projs, outcomes, min_edge=self._min_edge)
+
+        # Visibility: one line per run so we can see the funnel (and that it ran).
+        logger.info(
+            "[artist_paper] funnel: %d outcomes, ytd=%d rates=%d contenders=%d -> %d edge(s): %s",
+            len(outcomes), len(ytd), len(rates), len(contenders), len(edges),
+            ", ".join(f"{e.side} {e.artist} {e.edge:+.2f}" for e in edges) or "none",
+        )
 
         # Step 9: build candidates
         return [self._make_candidate(edge) for edge in edges]
