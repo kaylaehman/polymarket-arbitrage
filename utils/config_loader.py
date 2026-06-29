@@ -394,6 +394,7 @@ class MusicPaperCfg:
     """Config for the MusicPaperStrategy — routes music_intel chart-edge signals
     into the paper book. PAPER only; never trades."""
     enabled: bool = False
+    mode: str = "paper"                 # "paper" | "live" — the executor places under this
     charts: list = field(default_factory=lambda: ["spotify_us_daily"])
     min_refresh_seconds: float = 1800.0
 
@@ -403,6 +404,7 @@ class ArtistPaperCfg:
     """Config for the ArtistPaperStrategy — bets the liquid Polymarket
     "Top Spotify Artist {year}" market from a YTD+rate projection. PAPER only."""
     enabled: bool = False
+    mode: str = "paper"                 # "paper" | "live" — the executor places under this
     year: str = "2026"
     min_edge: float = 0.10
     max_contenders: int = 12
