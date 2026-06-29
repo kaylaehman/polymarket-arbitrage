@@ -20,10 +20,11 @@ except ImportError:  # pragma: no cover
 logger = logging.getLogger(__name__)
 
 _ARTISTS_URL = "https://kworb.net/spotify/artists.html"
-_WAYBACK_AVAIL_URL = (
-    "http://archive.org/wayback/available"
-    "?url=kworb.net/spotify/artists.html&timestamp=20260101"
-)
+# NOTE: pass the query as params= so httpx URL-encodes the `url` value. Embedding
+# it with raw slashes (?url=kworb.net/spotify/artists.html) makes archive.org
+# return an empty archived_snapshots — the encoding matters.
+_WAYBACK_AVAIL_URL = "http://archive.org/wayback/available"
+_WAYBACK_PARAMS = {"url": "kworb.net/spotify/artists.html", "timestamp": "20260101"}
 _USER_AGENT = "music-intel/1.0 (+https://kaylas.systems)"
 
 # Column index 1 = "Streams" (all-time cumulative total in millions).
@@ -122,7 +123,7 @@ class YtdSource:
             return {}
 
         # Step 2: discover Wayback snapshot URL for Jan 1 2026.
-        resp_avail = await self._http.get(_WAYBACK_AVAIL_URL)
+        resp_avail = await self._http.get(_WAYBACK_AVAIL_URL, params=_WAYBACK_PARAMS)
         resp_avail.raise_for_status()
         avail_json = resp_avail.json()
         closest = avail_json.get("archived_snapshots", {}).get("closest")

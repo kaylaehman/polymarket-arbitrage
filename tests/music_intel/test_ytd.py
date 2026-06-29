@@ -76,3 +76,14 @@ async def test_error_returns_empty():
     http = MagicMock()
     http.get = AsyncMock(side_effect=RuntimeError("down"))
     assert await YtdSource(http=http).ytd_2026() == {}
+
+
+@pytest.mark.asyncio
+async def test_wayback_availability_called_with_encoded_params():
+    """Regression: archive.org returns empty archived_snapshots if the `url` is
+    embedded with raw slashes; it must be passed via params= so httpx encodes it."""
+    http = _http_for(NOW, JAN)
+    await YtdSource(http=http).ytd_2026()
+    avail = [c for c in http.get.call_args_list if "wayback/available" in c.args[0]]
+    assert avail, "availability endpoint was not called"
+    assert avail[0].kwargs.get("params", {}).get("url") == "kworb.net/spotify/artists.html"
