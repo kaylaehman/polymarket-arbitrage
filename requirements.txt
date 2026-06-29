@@ -33,3 +33,8 @@ pytest-asyncio>=0.21.0
 black>=23.0.0
 mypy>=1.7.0
 
+# Music Intel — chart scraping and future phases
+beautifulsoup4>=4.12
+lxml>=5.0
+billboard.py>=7.0
+
