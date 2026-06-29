@@ -6,10 +6,12 @@ longshot-NO markets, ~weather-only). PAPER only — emits DirectionalCandidate.
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any
 
 from core.directional.models import DirectionalCandidate
 from core.directional.strategies.base import Strategy
+from core.macro_data import parse_macro_ticker
 from core.sports_data import kalshi_series_to_odds, match_team
 
 logger = logging.getLogger(__name__)
@@ -70,6 +72,35 @@ class ConsensusDivergenceStrategy(Strategy):
                         edge=edge,
                         strategy=self.name,
                         reasoning=f"sports consensus {p_gate:.3f} vs mkt {yes_mid:.3f} -> {side}",
+                    ))
+                except Exception:
+                    continue
+            macro_client = ctx.get("macro")
+            mm = parse_macro_ticker(m.ticker)
+            if mm is not None and macro_client is not None and self._macro_cfg is not None:
+                if mm.market_type == "bucket":
+                    continue  # two-sided bucket prob is out of scope for this strategy
+                try:
+                    sigma = float(getattr(self._macro_cfg, "sigma", {}).get(mm.indicator, 0.0))
+                    if sigma <= 0:
+                        continue
+                    nowcast = await macro_client.nowcast(mm.indicator)
+                    if nowcast is None:
+                        continue
+                    z = (nowcast - mm.threshold) / (sigma * (2 ** 0.5))
+                    p_gate = 0.5 * (1 + math.erf(z))
+                    if mm.direction == "below":
+                        p_gate = 1 - p_gate
+                    res = divergence_side(p_gate, yes_mid, self._min_div)
+                    if res is None:
+                        continue
+                    side, edge = res
+                    market_price = yes_mid if side == "YES" else round(1 - yes_mid, 4)
+                    candidates.append(DirectionalCandidate(
+                        market_id=m.to_unified_market_id(), title=getattr(m, "title", ""),
+                        category=cat, side=side, market_price=market_price,
+                        ai_probability=p_gate, confidence=None, edge=edge, strategy=self.name,
+                        reasoning=f"macro nowcast {nowcast:.3f} vs thr {mm.threshold:.3f} -> P(YES)={p_gate:.3f} vs mkt {yes_mid:.3f}",
                     ))
                 except Exception:
                     continue

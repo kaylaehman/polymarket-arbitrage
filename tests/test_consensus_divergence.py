@@ -69,3 +69,47 @@ async def test_scan_skips_excluded_category():
         async def championship_probs(self, t): return {"Washington Wizards": 0.03}
     s = ConsensusDivergenceStrategy(min_divergence=0.10, skip_categories=["Sports"])
     assert await s.scan([m], {"no_ask": lambda t: 0.80, "sports": _Sports()}) == []
+
+
+@pytest.mark.asyncio
+async def test_scan_macro_emits_candidate_on_divergence():
+    from types import SimpleNamespace
+    import datetime
+    m = SimpleNamespace(ticker="KXCPIYOY-26JUL-T3.0", title="Will CPI YoY be above 3.0%?",
+                        yes_sub_title="", subtitle="", category="Economics", yes_price=0.50,
+                        close_time=datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(days=20),
+                        to_unified_market_id=lambda: "kalshi:KXCPIYOY-26JUL-T3.0")
+    class _Macro:
+        async def nowcast(self, indicator): return 4.2   # 4.2% >> 3.0 threshold -> P(YES)~1
+    macro_cfg = SimpleNamespace(sigma={"CPIYOY": 0.2})
+    s = ConsensusDivergenceStrategy(min_divergence=0.10, skip_categories=[], macro_cfg=macro_cfg)
+    cands = await s.scan([m], {"no_ask": lambda t: 0.50, "macro": _Macro()})
+    assert len(cands) == 1 and cands[0].side == "YES"
+    assert cands[0].strategy == "consensus_divergence"
+
+@pytest.mark.asyncio
+async def test_scan_macro_no_macro_cfg_skips():
+    from types import SimpleNamespace
+    import datetime
+    m = SimpleNamespace(ticker="KXCPIYOY-26JUL-T3.0", title="t", yes_sub_title="", subtitle="",
+                        category="Economics", yes_price=0.50,
+                        close_time=datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(days=20),
+                        to_unified_market_id=lambda: "kalshi:KXCPIYOY-26JUL-T3.0")
+    class _Macro:
+        async def nowcast(self, indicator): return 4.2
+    s = ConsensusDivergenceStrategy(min_divergence=0.10, skip_categories=[])  # no macro_cfg
+    assert await s.scan([m], {"no_ask": lambda t: 0.50, "macro": _Macro()}) == []
+
+@pytest.mark.asyncio
+async def test_scan_macro_nowcast_none_skips():
+    from types import SimpleNamespace
+    import datetime
+    m = SimpleNamespace(ticker="KXCPIYOY-26JUL-T3.0", title="t", yes_sub_title="", subtitle="",
+                        category="Economics", yes_price=0.50,
+                        close_time=datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(days=20),
+                        to_unified_market_id=lambda: "kalshi:KXCPIYOY-26JUL-T3.0")
+    class _Macro:
+        async def nowcast(self, indicator): return None
+    macro_cfg = SimpleNamespace(sigma={"CPIYOY": 0.2})
+    s = ConsensusDivergenceStrategy(min_divergence=0.10, skip_categories=[], macro_cfg=macro_cfg)
+    assert await s.scan([m], {"no_ask": lambda t: 0.50, "macro": _Macro()}) == []
