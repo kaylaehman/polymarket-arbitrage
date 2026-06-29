@@ -86,3 +86,17 @@ def test_min_edge_filters_small():
     outs = [ArtistOutcome("X", "pm:9", 0.06)]
     # model 0.03 band [0.02, 0.04]; market 0.06 > hi 0.04 -> NO, but |0.03-0.06|=0.03 < min_edge 0.05 -> filtered
     assert compute_artist_edges([_proj("X", 0.03, 0.02, 0.04)], outs, min_edge=0.05) == []
+
+
+@pytest.mark.asyncio
+async def test_discover_artist_market_by_slug():
+    from music_intel.artist_markets import discover_artist_market
+    import json
+    evt=[{"title":"X","markets":[{"id":"7","groupItemTitle":"Bad Bunny","outcomePrices":json.dumps(["0.5","0.5"])}]}]
+    from unittest.mock import AsyncMock, MagicMock
+    r=MagicMock(); r.json=MagicMock(return_value=evt); r.raise_for_status=MagicMock()
+    http=MagicMock(); http.get=AsyncMock(return_value=r)
+    outs=await discover_artist_market(http, "top-spotify-artist-in-june")
+    assert len(outs)==1 and outs[0].pm_market_id=="pm:7"
+    # the slug was passed through to the gamma query
+    assert any("top-spotify-artist-in-june" in str(c.kwargs.get("params","")) or "top-spotify-artist-in-june" in str(c.args) for c in http.get.call_args_list)

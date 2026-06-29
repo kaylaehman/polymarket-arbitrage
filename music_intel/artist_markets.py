@@ -43,18 +43,24 @@ def _normalize(name: str) -> str:
     return re.sub(r"\s+", " ", decomposed).strip().casefold()
 
 
-async def discover_top_artist_markets(
+async def discover_artist_market(
     http: Any,
-    year: str = "2026",
+    slug: str,
     gamma_url: str = _GAMMA_DEFAULT,
 ) -> list[ArtistOutcome]:
-    """Fetch the Top-Spotify-Artist event and return one ArtistOutcome per market.
+    """Fetch a Polymarket event by exact slug and return one ArtistOutcome per market.
 
-    Returns [] on any network or parsing error — never raises.
+    Args:
+        http: An httpx.AsyncClient (or compatible mock).
+        slug: The Gamma API event slug (e.g. "top-spotify-artist-2026").
+        gamma_url: Gamma API base URL.
+
+    Returns:
+        List of ArtistOutcome; [] on any network or parsing error — never raises.
     """
     url = f"{gamma_url.rstrip('/')}/events"
     try:
-        resp = await http.get(url, params={"slug": f"top-spotify-artist-{year}"})
+        resp = await http.get(url, params={"slug": slug})
         resp.raise_for_status()
         data = resp.json()
     except Exception as exc:  # noqa: BLE001
@@ -78,6 +84,19 @@ async def discover_top_artist_markets(
         market_id = f"pm:{market.get('id', '')}"
         out.append(ArtistOutcome(artist=artist, pm_market_id=market_id, yes_price=yes_price))
     return out
+
+
+async def discover_top_artist_markets(
+    http: Any,
+    year: str = "2026",
+    gamma_url: str = _GAMMA_DEFAULT,
+) -> list[ArtistOutcome]:
+    """Fetch the Top-Spotify-Artist event and return one ArtistOutcome per market.
+
+    Thin wrapper around discover_artist_market using the standard slug pattern.
+    Returns [] on any network or parsing error — never raises.
+    """
+    return await discover_artist_market(http, f"top-spotify-artist-{year}", gamma_url)
 
 
 def compute_artist_edges(
