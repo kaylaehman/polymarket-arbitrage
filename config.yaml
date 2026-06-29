@@ -409,6 +409,14 @@ directional:
     enabled: true
     charts: ["spotify_us_daily"]
     min_refresh_seconds: 1800   # throttle kworb scrape to ~hourly (politeness)
+  # Artist paper: bet the liquid Polymarket "Top Spotify Artist {year}" market
+  # from a YTD(streams)+rate projection. PAPER only; settles via pm: tracker.
+  artist_paper:
+    enabled: true
+    year: "2026"
+    min_edge: 0.10
+    max_contenders: 12
+    min_refresh_seconds: 86400
 
 
 # ── Alerts ────────────────────────────────────────────────────────────────────

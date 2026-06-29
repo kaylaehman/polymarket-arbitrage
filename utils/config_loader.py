@@ -399,6 +399,17 @@ class MusicPaperCfg:
 
 
 @dataclass
+class ArtistPaperCfg:
+    """Config for the ArtistPaperStrategy — bets the liquid Polymarket
+    "Top Spotify Artist {year}" market from a YTD+rate projection. PAPER only."""
+    enabled: bool = False
+    year: str = "2026"
+    min_edge: float = 0.10
+    max_contenders: int = 12
+    min_refresh_seconds: float = 86400.0
+
+
+@dataclass
 class DirectionalConfig:
     """Directional trading mode config. Disabled by default (additive)."""
     enabled: bool = False
@@ -421,6 +432,7 @@ class DirectionalConfig:
     sports: SportsCfg = field(default_factory=SportsCfg)
     consensus_divergence: ConsensusDivergenceCfg = field(default_factory=ConsensusDivergenceCfg)
     music_paper: MusicPaperCfg = field(default_factory=MusicPaperCfg)
+    artist_paper: ArtistPaperCfg = field(default_factory=ArtistPaperCfg)
 
 
 @dataclass
@@ -601,7 +613,8 @@ def _build_directional(data: dict) -> DirectionalConfig:
     sports = _build_dataclass(SportsCfg, data.get("sports", {}) or {})
     consensus_divergence = _build_dataclass(ConsensusDivergenceCfg, data.get("consensus_divergence", {}) or {})
     music_paper = _build_dataclass(MusicPaperCfg, data.get("music_paper", {}) or {})
-    _sub = ("caps", "safe_compounder", "ai_directional", "maker_longshot", "scanner", "weather", "financial", "pmus_weather", "macro", "sports", "consensus_divergence", "music_paper")
+    artist_paper = _build_dataclass(ArtistPaperCfg, data.get("artist_paper", {}) or {})
+    _sub = ("caps", "safe_compounder", "ai_directional", "maker_longshot", "scanner", "weather", "financial", "pmus_weather", "macro", "sports", "consensus_divergence", "music_paper", "artist_paper")
     top = {k: v for k, v in data.items() if k not in _sub}
     return _build_dataclass(DirectionalConfig, {
         **top,
@@ -617,6 +630,7 @@ def _build_directional(data: dict) -> DirectionalConfig:
         "sports": sports,
         "consensus_divergence": consensus_divergence,
         "music_paper": music_paper,
+        "artist_paper": artist_paper,
     })
 
 
