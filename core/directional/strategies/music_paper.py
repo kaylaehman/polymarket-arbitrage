@@ -4,6 +4,7 @@ emit if the music engine reports execution enabled."""
 from __future__ import annotations
 
 import logging
+import time
 from core.directional.models import DirectionalCandidate
 from core.directional.strategies.base import Strategy
 
@@ -11,9 +12,11 @@ logger = logging.getLogger(__name__)
 
 
 class MusicPaperStrategy(Strategy):
-    def __init__(self, *, engine, charts: list) -> None:
+    def __init__(self, *, engine, charts: list, min_refresh_seconds: float = 1800.0) -> None:
         self._engine = engine
         self._charts = list(charts)
+        self._min_refresh = float(min_refresh_seconds)
+        self._last_run: float | None = None
 
     @property
     def name(self) -> str:
@@ -23,6 +26,10 @@ class MusicPaperStrategy(Strategy):
         if self._engine.execution_enabled():
             logger.warning("[music_paper] engine.execution_enabled() True -> emitting nothing")
             return []
+        now = time.monotonic()
+        if self._last_run is not None and (now - self._last_run) < self._min_refresh:
+            return []
+        self._last_run = now
         out = []
         for chart in self._charts:
             try:

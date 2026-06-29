@@ -390,6 +390,15 @@ class ConsensusDivergenceCfg:
 
 
 @dataclass
+class MusicPaperCfg:
+    """Config for the MusicPaperStrategy — routes music_intel chart-edge signals
+    into the paper book. PAPER only; never trades."""
+    enabled: bool = False
+    charts: list = field(default_factory=lambda: ["spotify_us_daily"])
+    min_refresh_seconds: float = 1800.0
+
+
+@dataclass
 class DirectionalConfig:
     """Directional trading mode config. Disabled by default (additive)."""
     enabled: bool = False
@@ -411,6 +420,7 @@ class DirectionalConfig:
     macro: MacroCfg = field(default_factory=MacroCfg)
     sports: SportsCfg = field(default_factory=SportsCfg)
     consensus_divergence: ConsensusDivergenceCfg = field(default_factory=ConsensusDivergenceCfg)
+    music_paper: MusicPaperCfg = field(default_factory=MusicPaperCfg)
 
 
 @dataclass
@@ -590,7 +600,8 @@ def _build_directional(data: dict) -> DirectionalConfig:
     macro = _build_dataclass(MacroCfg, data.get("macro", {}) or {})
     sports = _build_dataclass(SportsCfg, data.get("sports", {}) or {})
     consensus_divergence = _build_dataclass(ConsensusDivergenceCfg, data.get("consensus_divergence", {}) or {})
-    _sub = ("caps", "safe_compounder", "ai_directional", "maker_longshot", "scanner", "weather", "financial", "pmus_weather", "macro", "sports", "consensus_divergence")
+    music_paper = _build_dataclass(MusicPaperCfg, data.get("music_paper", {}) or {})
+    _sub = ("caps", "safe_compounder", "ai_directional", "maker_longshot", "scanner", "weather", "financial", "pmus_weather", "macro", "sports", "consensus_divergence", "music_paper")
     top = {k: v for k, v in data.items() if k not in _sub}
     return _build_dataclass(DirectionalConfig, {
         **top,
@@ -605,6 +616,7 @@ def _build_directional(data: dict) -> DirectionalConfig:
         "macro": macro,
         "sports": sports,
         "consensus_divergence": consensus_divergence,
+        "music_paper": music_paper,
     })
 
 

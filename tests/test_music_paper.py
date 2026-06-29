@@ -42,3 +42,38 @@ async def test_run_once_error_is_swallowed():
         async def run_once(self, chart, as_of=None): raise RuntimeError("boom")
     s = MusicPaperStrategy(engine=_BadEng(), charts=["spotify_us_daily"])
     assert await s.scan([], {}) == []
+
+@pytest.mark.asyncio
+async def test_throttle_skips_within_interval():
+    # engine.run_once should be called only once across two quick scans
+    calls = {"n": 0}
+    class _Sig:
+        market_id="pm:1"; question="q"; target="t"; model_prob=0.8; market_prob=0.3
+        confidence=0.7; net_edge=0.5; side="YES"
+    class _Res:
+        signals=[_Sig()]
+    class _Eng:
+        def execution_enabled(self): return False
+        async def run_once(self, chart, as_of=None):
+            calls["n"] += 1; return _Res()
+    s = MusicPaperStrategy(engine=_Eng(), charts=["spotify_us_daily"], min_refresh_seconds=9999)
+    first = await s.scan([], {})
+    second = await s.scan([], {})
+    assert len(first) == 1            # first cycle runs
+    assert second == []              # second cycle throttled
+    assert calls["n"] == 1           # engine hit only once
+
+@pytest.mark.asyncio
+async def test_zero_interval_runs_every_time():
+    calls = {"n": 0}
+    class _Sig:
+        market_id="pm:1"; question="q"; target="t"; model_prob=0.8; market_prob=0.3
+        confidence=0.7; net_edge=0.5; side="YES"
+    class _Res: signals=[_Sig()]
+    class _Eng:
+        def execution_enabled(self): return False
+        async def run_once(self, chart, as_of=None):
+            calls["n"] += 1; return _Res()
+    s = MusicPaperStrategy(engine=_Eng(), charts=["spotify_us_daily"], min_refresh_seconds=0)
+    await s.scan([], {}); await s.scan([], {})
+    assert calls["n"] == 2

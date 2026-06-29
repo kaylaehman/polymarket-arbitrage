@@ -403,6 +403,13 @@ directional:
     min_yes_price: 0.05
     skip_categories: []
 
+  # Music: route music_intel chart-edge signals into the paper book (settles via
+  # Gamma resolution; see music_intel/). PAPER only; never trades.
+  music_paper:
+    enabled: true
+    charts: ["spotify_us_daily"]
+    min_refresh_seconds: 1800   # throttle kworb scrape to ~hourly (politeness)
+
 
 # ── Alerts ────────────────────────────────────────────────────────────────────
 # Push trade/kill-switch/position events to Discord and/or Telegram.
