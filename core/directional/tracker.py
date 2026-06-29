@@ -47,9 +47,23 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from core.directional.models import DirectionalPosition
+from core.kalshi_fees import fee_per_contract
 from polymarket_client.models import OrderStatus
 
 logger = logging.getLogger(__name__)
+
+
+def settlement_pnl(entry_price: float, size: float, resolution_price: float) -> float:
+    """Realized P&L for a held-to-resolution position, NET of the entry fee.
+
+    Kalshi charges a trading fee on the opening trade (``fee_per_contract`` at the
+    entry price); settlement itself is free.  Paper used to record this GROSS,
+    which overstated EV vs. the fee-NET backtest the strategy was validated on —
+    so the category-breakdown go-live gate was reading inflated numbers.  This
+    nets it out conservatively (see ``core/kalshi_fees``).
+    """
+    gross = (resolution_price - entry_price) * size
+    return gross - fee_per_contract(entry_price) * size
 
 # C1 FIX: safe_compounder removed — SC positions are held to resolution only,
 # not subject to stop-loss/take-profit/max-hold sweep.
@@ -135,6 +149,42 @@ class Tracker:
 
     # ──────────────────────────────────────────────────────────────────────────
 
+    def _alert_settled(self, pos: DirectionalPosition, realized_pnl: float) -> None:
+        """Fire a settle notification (this bet's P/L + overall realized P/L).
+
+        Skips multi_outcome legs (they don't fire a place alert, and a 6-leg lock
+        would spam).  Fire-and-forget — never raises into the sweep.  Overall P&L
+        is read AFTER update_position, so it includes this settlement.
+        """
+        if pos.strategy == "multi_outcome":
+            return
+        try:
+            import asyncio
+            from core import alerts
+            if alerts._ALERTER is None:
+                return
+            total = self._store.pnl_summary().get("total_realized_pnl", 0.0)
+            if realized_pnl > 0:
+                emoji, verb = "✅", "WON"
+            elif realized_pnl < 0:
+                emoji, verb = "❌", "LOST"
+            else:
+                emoji, verb = "➖", "flat"
+            coro = alerts.notify(
+                "directional_settled",
+                f"{emoji} Bet settled: {pos.side} {pos.market_id} ${realized_pnl:+.2f}",
+                f"{verb} **${realized_pnl:+.2f}** on {pos.side} @ ${pos.entry_price:.2f} "
+                f"(x{pos.size})\nOverall realized P&L: **${total:+.2f}**",
+                severity="info",
+                dedup_key=f"{pos.market_id}:settled",
+            )
+            try:
+                asyncio.get_running_loop().create_task(coro)
+            except RuntimeError:
+                asyncio.run(coro)
+        except Exception:
+            pass
+
     async def _check_resolution(self, pos: DirectionalPosition) -> bool:
         """Settle position if the underlying market has resolved.
 
@@ -165,9 +215,9 @@ class Tracker:
         else:
             return False
 
-        # M5: paper P&L is GROSS of Kalshi fees; go-live expectancy gate must
-        # account for the ~1% fee per side before comparing paper vs. live hurdle.
-        realized_pnl = (resolution_price - pos.entry_price) * pos.size
+        # NET of the Kalshi entry fee so paper EV matches the fee-net backtest
+        # (the go-live gate reads these numbers — see settlement_pnl).
+        realized_pnl = settlement_pnl(pos.entry_price, pos.size, resolution_price)
         self._store.update_position(
             pos.market_id,
             status="closed",
@@ -175,12 +225,13 @@ class Tracker:
             closed_at=datetime.now(timezone.utc).isoformat(),
         )
         logger.info(
-            "Resolved %s %s side=%s pnl=%.4f",
+            "Resolved %s %s side=%s pnl=%.4f (net of fees)",
             pos.market_id,
             market.result,
             pos.side,
             realized_pnl,
         )
+        self._alert_settled(pos, realized_pnl)
         return True
 
     async def _check_pmus_resolution(self, pos: DirectionalPosition) -> bool:
@@ -218,7 +269,9 @@ class Tracker:
         else:
             return False
 
-        realized_pnl = (resolution_price - pos.entry_price) * pos.size
+        # NET of the entry fee (conservative; PM.US fees are typically lower than
+        # Kalshi's, so this understates rather than overstates PM.US EV).
+        realized_pnl = settlement_pnl(pos.entry_price, pos.size, resolution_price)
         self._store.update_position(
             pos.market_id,
             status="closed",
@@ -226,12 +279,13 @@ class Tracker:
             closed_at=datetime.now(timezone.utc).isoformat(),
         )
         logger.info(
-            "Resolved %s %s side=%s pnl=%.4f",
+            "Resolved %s %s side=%s pnl=%.4f (net of fees)",
             pos.market_id,
             result,
             pos.side,
             realized_pnl,
         )
+        self._alert_settled(pos, realized_pnl)
         return True
 
     async def _check_exit(
@@ -261,7 +315,10 @@ class Tracker:
             # Delegate to executor.close_position so the SELL side/token is encapsulated.
             await self._executor.close_position(pos, current_price, mode="live")
 
-        realized_pnl = (current_price - pos.entry_price) * pos.size
+        # Early exit is a round trip: fee on the entry AND the exit trade.
+        gross = (current_price - pos.entry_price) * pos.size
+        fees = (fee_per_contract(pos.entry_price) + fee_per_contract(current_price)) * pos.size
+        realized_pnl = gross - fees
         self._store.update_position(
             pos.market_id,
             status="closed",

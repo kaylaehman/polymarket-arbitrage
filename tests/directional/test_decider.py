@@ -141,3 +141,66 @@ def test_ai_yes_side_kelly_sizes_positively():
     o = d.decide(ai_cand(side="YES"))
     assert o is not None and o.side == "YES"
     assert o.size >= 1
+
+
+# ── per-bucket cap: cap longshot (non-daily) count, daily (weather) uncapped ───
+
+class _Pos:
+    def __init__(self, market_id):
+        self.market_id = market_id
+
+
+class STWith:
+    def __init__(self, open_mids):
+        self._open = [_Pos(m) for m in open_mids]
+    def directional_exposure(self):
+        return 0.0
+    def open_positions(self):
+        return self._open
+
+
+class CapsLongshot:
+    max_position = 8
+    total_exposure = 100
+    max_open = 1000
+    max_open_longshot = 2
+
+
+def _maker_cand(market_id):
+    return DirectionalCandidate(
+        market_id=market_id, title="t", category="x", side="NO",
+        market_price=0.93, ai_probability=None, confidence=None,
+        edge=0.04, strategy="maker_longshot",
+    )
+
+
+def test_longshot_bucket_capped():
+    """3rd non-daily (macro) bet rejected once the longshot bucket (cap 2) is full."""
+    st = STWith(["kalshi:KXCPIYOY-26JUN-T3.9", "kalshi:KXCPI-26JUN-T0.0"])
+    d = Decider(RM(), st, kelly_frac=0.25, max_position_usd=8, cash_balance_fn=lambda: 100, caps=CapsLongshot())
+    assert d.decide(_maker_cand("kalshi:KXPCECORE-26JUN-T0.4")) is None
+
+
+def test_daily_weather_uncapped_when_longshot_full():
+    """A daily weather bet is still placed even when the longshot bucket is full."""
+    st = STWith(["kalshi:KXCPIYOY-26JUN-T3.9", "kalshi:KXCPI-26JUN-T0.0"])
+    d = Decider(RM(), st, kelly_frac=0.25, max_position_usd=8, cash_balance_fn=lambda: 100, caps=CapsLongshot())
+    o = d.decide(_maker_cand("kalshi:KXHIGHNY-26JUN30-B70"))
+    assert o is not None and o.size >= 1
+    # PM.US weather slug also counts as daily
+    o2 = d.decide(_maker_cand("pmus:tc-temp-sfohigh-2026-06-30-gte74f"))
+    assert o2 is not None
+
+
+def test_longshot_allowed_under_cap():
+    """A non-daily bet is allowed while the longshot bucket is below the cap."""
+    st = STWith(["kalshi:KXCPIYOY-26JUN-T3.9"])  # 1 open, cap 2
+    d = Decider(RM(), st, kelly_frac=0.25, max_position_usd=8, cash_balance_fn=lambda: 100, caps=CapsLongshot())
+    assert d.decide(_maker_cand("kalshi:KXCPI-26JUN-T0.0")) is not None
+
+
+def test_open_weather_does_not_count_against_longshot_cap():
+    """Many open weather positions don't fill the longshot bucket."""
+    st = STWith([f"kalshi:KXHIGHNY-26JUN30-B{i}" for i in range(10)])  # 10 weather open
+    d = Decider(RM(), st, kelly_frac=0.25, max_position_usd=8, cash_balance_fn=lambda: 100, caps=CapsLongshot())
+    assert d.decide(_maker_cand("kalshi:KXCPI-26JUN-T0.0")) is not None  # longshot bucket empty

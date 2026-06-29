@@ -190,11 +190,24 @@ def build_directional_payload(store) -> dict:
     # Derive strategy names from signals (unique set, ordered)
     strategy_names = sorted({s["strategy"] for s in signals}) if signals else []
 
+    # Per-category validation breakout (#1): win-rate + EV + sample per category
+    # so the longshot-NO edge can be judged per category, not in one aggregate.
+    try:
+        category_breakdown = store.category_breakdown()
+    except Exception:  # never let analytics break the status endpoint
+        category_breakdown = {}
+    try:
+        multi_outcome = store.multi_outcome_summary()
+    except Exception:
+        multi_outcome = {}
+
     return {
         "strategies": strategy_names,
         "positions": positions,
         "signals": signals,
         "pnl": pnl,
+        "category_breakdown": category_breakdown,
+        "multi_outcome": multi_outcome,
     }
 
 
@@ -1609,6 +1622,7 @@ def get_embedded_html() -> str:
                     <span>Exposure: <strong id="directionalExposure">$0.00</strong></span>
                     <span>Closed: <strong id="directionalClosed">0</strong></span>
                 </div>
+                <div id="directionalCategoryBreakdown" style="margin-bottom:0.75rem;font-size:0.75rem;"></div>
                 <div class="activity-list" id="directionalPositionList">
                     <div class="empty-state">
                         <div class="empty-icon">--</div>
@@ -2600,6 +2614,47 @@ def get_embedded_html() -> str:
             if (expEl) expEl.textContent = '$' + ((pnl.open_exposure || 0).toFixed(2));
             const closedEl = document.getElementById('directionalClosed');
             if (closedEl) closedEl.textContent = String(pnl.closed_count || 0);
+
+            // Per-category validation breakout (#1): win-rate + EV + sample per category
+            const bdEl = document.getElementById('directionalCategoryBreakdown');
+            if (bdEl) {
+                const bd = data.category_breakdown || {};
+                const cats = Object.keys(bd).sort();
+                if (cats.length === 0) {
+                    bdEl.innerHTML = '';
+                } else {
+                    const vColor = {positive:'var(--accent-green)', negative:'var(--accent-red)',
+                        inconclusive:'var(--text-secondary)', insufficient:'var(--text-tertiary,#888)'};
+                    const rows = cats.map(c => {
+                        const b = bd[c];
+                        const wr = b.win_rate == null ? '--' : (b.win_rate * 100).toFixed(0) + '%';
+                        const pnl = (b.realized_pnl || 0);
+                        const pnlStr = (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2);
+                        const pnlColor = pnl >= 0 ? 'var(--accent-green)' : 'var(--accent-red)';
+                        const avg = b.avg_pnl_per_trade == null ? '--'
+                            : (b.avg_pnl_per_trade >= 0 ? '+' : '') + '$' + b.avg_pnl_per_trade.toFixed(3);
+                        let verdict = b.verdict || 'insufficient';
+                        if (verdict === 'insufficient' && b.needed_samples)
+                            verdict = '+' + b.needed_samples + ' more';
+                        return `<tr>
+                            <td style="text-transform:capitalize">${c}</td>
+                            <td style="text-align:right">${b.closed_count}</td>
+                            <td style="text-align:right">${wr}</td>
+                            <td style="text-align:right;color:${pnlColor}">${pnlStr}</td>
+                            <td style="text-align:right">${avg}</td>
+                            <td style="text-align:right">${b.open_count}</td>
+                            <td style="text-align:right;color:${vColor[b.verdict]||'#888'}">${verdict}</td>
+                        </tr>`;
+                    }).join('');
+                    bdEl.innerHTML = `<table style="width:100%;border-collapse:collapse;color:var(--text-secondary)">
+                        <thead><tr style="color:var(--text-tertiary,#888)">
+                            <th style="text-align:left">category</th><th style="text-align:right">resolved</th>
+                            <th style="text-align:right">win%</th><th style="text-align:right">net P&amp;L</th>
+                            <th style="text-align:right">EV/trade</th><th style="text-align:right">open</th>
+                            <th style="text-align:right">verdict</th>
+                        </tr></thead><tbody>${rows}</tbody></table>`;
+                }
+            }
 
             const list = document.getElementById('directionalPositionList');
             if (!list) return;

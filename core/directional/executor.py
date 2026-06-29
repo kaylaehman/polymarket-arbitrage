@@ -209,8 +209,11 @@ class Executor:
             if alerts._ALERTER is not None:
                 coro = alerts.notify(
                     "directional_open",
-                    f"{order.strategy} {order.side} {order.market_id}",
-                    f"price={order.price} size={order.size} mode={mode}",
+                    f"🎯 Bet placed: {order.side} {order.market_id} @ ${order.price:.2f}",
+                    f"Pick: **{order.side}**  ·  Odds: ${order.price:.2f} "
+                    f"({order.price * 100:.0f}% implied)  ·  "
+                    f"Size: {order.size} (${order.notional:.2f})  ·  "
+                    f"{order.strategy} · {mode}",
                     severity="info",
                     dedup_key=order.market_id,
                 )

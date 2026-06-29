@@ -89,6 +89,9 @@ DEFAULT_PRIORITY_SERIES: List[str] = [
     "KXHIGHCHI",  # Chicago daily high temperature
     "KXHIGHLAX",  # Los Angeles daily high temperature
     "KXHIGHMIA",  # Miami daily high temperature
+    "KXHIGHAUS",  # Austin daily high temperature (added 2026-06-24)
+    "KXHIGHDEN",  # Denver daily high temperature (added 2026-06-24)
+    "KXHIGHPHIL", # Philadelphia daily high temperature (added 2026-06-24)
     # Macro / economic releases — backtest-validated multi-day longshot series
     "KXCPI",          # US CPI month-on-month
     "KXCPIYOY",       # US CPI year-on-year

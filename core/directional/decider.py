@@ -18,9 +18,17 @@ import math
 from typing import Any, Callable
 
 from core.directional.models import DirectionalCandidate, DirectionalOrder
+from core.directional.store import category_for_market_id
 from core.kelly import kelly_fraction
 
 logger = logging.getLogger(__name__)
+
+# "Daily" bets (weather daily-highs, Kalshi KXHIGH* + PM.US tc-temp*) resolve
+# every day and are the fast-cycling, validated edge.  They are NOT subject to
+# the longshot count cap — only the total_exposure $ governs them.  Everything
+# else (macro CPI/PCE, cable, etc.) is a slower multi-day/week "longshot" that
+# would otherwise clog the book, so its OPEN COUNT is capped (caps.max_open_longshot).
+_DAILY_CATEGORY = "weather"
 
 
 class Decider:
@@ -72,6 +80,23 @@ class Decider:
             strategy=candidate.strategy,
             reasoning=candidate.reasoning,
         )
+
+        # Per-bucket count cap: cap the number of open LONGSHOT (non-daily) bets
+        # so slow multi-week positions (e.g. CPI) don't crowd out fast daily ones
+        # (weather).  Daily bets are exempt — only total_exposure $ limits them.
+        max_longshot = getattr(self._caps, "max_open_longshot", None)
+        is_daily = category_for_market_id(candidate.market_id) == _DAILY_CATEGORY
+        if not is_daily and max_longshot is not None and max_longshot >= 0:
+            open_longshot = sum(
+                1 for p in self._store.open_positions()
+                if category_for_market_id(p.market_id) != _DAILY_CATEGORY
+            )
+            if open_longshot >= max_longshot:
+                logger.debug(
+                    "Decider: longshot bucket full (%d/%d) — rejecting %s",
+                    open_longshot, max_longshot, candidate.market_id,
+                )
+                return None
 
         passed = self._rm.check_directional_order(
             order,

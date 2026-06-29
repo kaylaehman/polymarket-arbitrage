@@ -9,14 +9,105 @@ arb signal tables and uses its own db file (config.directional.db_path).
 """
 
 import logging
+import math
 import os
 import sqlite3
 from datetime import datetime, timezone
 from typing import Optional
 
+# Minimum resolved trades before a category's edge gets a statistical verdict.
+# Below this the verdict is "insufficient" no matter how good the early run looks
+# (small samples of a 90%-win longshot edge are dominated by not-yet-seen tail
+# losses).  90% one-sided z for the EV confidence bound.
+VALIDATION_MIN_SAMPLE = 30
+_Z90 = 1.2815515594457913
+
 from core.directional.models import DirectionalCandidate, DirectionalPosition
 
 logger = logging.getLogger(__name__)
+
+
+# Ticker-prefix → category map for the per-category validation breakout (#1).
+# Order matters: the first matching prefix wins, so longer/more-specific
+# prefixes (KXCPICORE) must precede shorter ones (KXCPI) — though here the
+# coarse buckets collapse them to the same category anyway.
+_CATEGORY_PREFIXES: tuple[tuple[str, str], ...] = (
+    ("KXHIGH", "weather"),
+    ("KXCPI", "macro"),
+    ("KXPCE", "macro"),
+    ("KXGDP", "macro"),
+    ("KXFED", "macro"),
+    ("KXBTC", "financial"),
+    ("KXETH", "financial"),
+    ("KXWTI", "financial"),
+    ("KXEUR", "financial"),
+    ("KXCABLE", "media"),
+    ("KXNBA", "sports"),
+    ("KXNHL", "sports"),
+    ("KXMLB", "sports"),
+    ("KXNFL", "sports"),
+)
+
+
+def _verdict(closed_pnls: list) -> dict:
+    """Statistical go/no-go verdict for a category's resolved P&L (#3).
+
+    Returns ``verdict`` plus a 90% confidence band on mean EV-per-trade:
+      * ``"insufficient"`` — fewer than ``VALIDATION_MIN_SAMPLE`` resolved trades
+        (with ``needed_samples`` = how many more); never trust a small sample of
+        a longshot edge, where rare tail losses dominate.
+      * ``"positive"``     — 90% lower bound on mean EV > 0 (edge looks real).
+      * ``"negative"``     — 90% upper bound < 0.
+      * ``"inconclusive"`` — band straddles 0 (need a tighter sample).
+
+    Band: ``mean ± z90 * stderr`` with the sample standard deviation.  Rough
+    (normal approx, ignores P&L skew) but enough to stop "3 wins = ship it".
+    """
+    n = len(closed_pnls)
+    out = {"verdict": "insufficient", "needed_samples": VALIDATION_MIN_SAMPLE,
+           "ev_ci90_lo": None, "ev_ci90_hi": None}
+    if n == 0:
+        return out
+    if n < VALIDATION_MIN_SAMPLE:
+        out["needed_samples"] = VALIDATION_MIN_SAMPLE - n
+        return out
+
+    out["needed_samples"] = 0
+    mean = sum(closed_pnls) / n
+    var = sum((x - mean) ** 2 for x in closed_pnls) / (n - 1) if n > 1 else 0.0
+    stderr = math.sqrt(var / n)
+    lo = mean - _Z90 * stderr
+    hi = mean + _Z90 * stderr
+    out["ev_ci90_lo"] = round(lo, 4)
+    out["ev_ci90_hi"] = round(hi, 4)
+    if lo > 0:
+        out["verdict"] = "positive"
+    elif hi < 0:
+        out["verdict"] = "negative"
+    else:
+        out["verdict"] = "inconclusive"
+    return out
+
+
+def category_for_market_id(market_id: str) -> str:
+    """Map a venue-prefixed market_id to a coarse trading category.
+
+    Used by the per-category validation breakout so win-rate / EV can be judged
+    per category (weather vs macro vs ...) instead of in one weather-dominated
+    aggregate.  PM.US temperature slugs (``pmus:tc-temp-...``) are weather;
+    bare/unknown tickers fall through to ``"other"``.
+    """
+    if market_id.startswith("pmus:"):
+        slug = market_id.split(":", 1)[1]
+        if "temp" in slug or "high" in slug or "low" in slug:
+            return "weather"
+        return "other"
+    ticker = market_id.split(":", 1)[1] if ":" in market_id else market_id
+    ticker = ticker.upper()
+    for prefix, category in _CATEGORY_PREFIXES:
+        if ticker.startswith(prefix):
+            return category
+    return "other"
 
 
 _SCHEMA = """
@@ -189,6 +280,91 @@ class DirectionalStore:
             "closed_count": row["closed_count"],
             "open_exposure": float(row["open_exposure"]),
             "total_realized_pnl": float(row["total_realized_pnl"]),
+        }
+
+    def category_breakdown(self) -> dict:
+        """Per-category validation breakout (#1).
+
+        Buckets every position by ``category_for_market_id(market_id)`` and, for
+        each category, reports the metrics needed to decide whether the
+        longshot-NO edge actually holds *for that category* (vs. being a
+        weather-only artifact):
+
+          * ``closed_count`` / ``wins`` / ``losses`` — resolved-trade sample.
+          * ``win_rate`` — wins / closed, or ``None`` when nothing has resolved.
+          * ``realized_pnl`` — net realized P&L (the tracker records P&L gross of
+            Kalshi fees; treat as an upper bound on live EV).
+          * ``avg_pnl_per_trade`` — realized_pnl / closed_count, or ``None``.
+          * ``open_count`` / ``open_exposure`` — current live paper book.
+
+        A ``win`` is a resolved position with ``realized_pnl > 0``.  Pending
+        positions (never filled) are ignored — only ``open`` and ``closed``
+        count.
+        """
+        # Exclude multi_outcome locks: they are riskless N-leg YES covers (exactly
+        # one leg wins) whose 1/N "win rate" would muddy the longshot-NO edge
+        # signal this breakout exists to measure.  They get their own summary.
+        rows = self._conn.execute(
+            """SELECT market_id, status, notional, realized_pnl
+               FROM directional_positions
+               WHERE status IN ('open', 'closed')
+                 AND strategy != 'multi_outcome'"""
+        ).fetchall()
+
+        agg: dict[str, dict] = {}
+        pnls: dict[str, list] = {}
+        for r in rows:
+            cat = category_for_market_id(r["market_id"])
+            b = agg.setdefault(
+                cat,
+                {"closed_count": 0, "wins": 0, "losses": 0,
+                 "realized_pnl": 0.0, "open_count": 0, "open_exposure": 0.0},
+            )
+            if r["status"] == "open":
+                b["open_count"] += 1
+                b["open_exposure"] += float(r["notional"] or 0.0)
+            elif r["status"] == "closed":
+                b["closed_count"] += 1
+                pnl = float(r["realized_pnl"] or 0.0)
+                b["realized_pnl"] += pnl
+                pnls.setdefault(cat, []).append(pnl)
+                if pnl > 0:
+                    b["wins"] += 1
+                elif pnl < 0:
+                    b["losses"] += 1
+
+        for cat, b in agg.items():
+            closed = b["closed_count"]
+            b["win_rate"] = (b["wins"] / closed) if closed else None
+            b["avg_pnl_per_trade"] = (b["realized_pnl"] / closed) if closed else None
+            b["realized_pnl"] = round(b["realized_pnl"], 4)
+            b["open_exposure"] = round(b["open_exposure"], 4)
+            b.update(_verdict(pnls.get(cat, [])))
+        return agg
+
+    def multi_outcome_summary(self) -> dict:
+        """Aggregate state of riskless multi-outcome lock legs (strategy='multi_outcome').
+
+        Each lock is recorded as N YES legs; when the event resolves exactly one
+        settles to +1 and the rest to 0, so the net realized P&L across a lock's
+        legs is the (paper, fee-gross) riskless profit.
+        """
+        row = self._conn.execute(
+            """SELECT
+                COUNT(*) FILTER (WHERE status = 'open') AS open_count,
+                COUNT(*) FILTER (WHERE status = 'closed') AS closed_count,
+                COALESCE(SUM(realized_pnl) FILTER (WHERE status = 'closed'), 0.0) AS realized_pnl,
+                COALESCE(SUM(notional) FILTER (WHERE status = 'open'), 0.0) AS open_notional
+               FROM directional_positions
+               WHERE strategy = 'multi_outcome'"""
+        ).fetchone()
+        if row is None:
+            return {"open_count": 0, "closed_count": 0, "realized_pnl": 0.0, "open_notional": 0.0}
+        return {
+            "open_count": row["open_count"],
+            "closed_count": row["closed_count"],
+            "realized_pnl": round(float(row["realized_pnl"]), 4),
+            "open_notional": round(float(row["open_notional"]), 4),
         }
 
 

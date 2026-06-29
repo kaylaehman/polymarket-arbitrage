@@ -159,6 +159,16 @@ def test_series_station_ny_coordinates():
     assert abs(s.lon - (-73.9654)) < 0.1
 
 
+def test_series_station_new_cities_present():
+    """Austin / Denver / Philadelphia added 2026-06-24 with confirmed stations."""
+    for series in ("KXHIGHAUS", "KXHIGHDEN", "KXHIGHPHIL"):
+        assert series in SERIES_STATION
+        st = SERIES_STATION[series]
+        # plausible CONUS coordinates (sanity, not exact)
+        assert 24.0 < st.lat < 50.0
+        assert -125.0 < st.lon < -66.0
+
+
 # ── forecast_high (mocked NWS) ────────────────────────────────────────────────
 
 def _make_nws_periods(target_date: date, temp: float) -> list[dict]:

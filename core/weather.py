@@ -251,6 +251,11 @@ SERIES_STATION: dict[str, Station] = {
     "KXHIGHCHI": Station("Chicago Midway Airport, IL",  41.7868, -87.7522),
     "KXHIGHLAX": Station("Los Angeles Airport, CA",     33.9425, -118.4081),
     "KXHIGHMIA": Station("Miami International Airport", 25.7959, -80.2870),
+    # Added 2026-06-24. Settlement source confirmed via the Kalshi series
+    # `settlement_sources` (NWS CLI product): AUS/DEN/PHIL official climate stations.
+    "KXHIGHAUS": Station("Austin-Bergstrom Intl, TX",  30.1975, -97.6664),
+    "KXHIGHDEN": Station("Denver Intl Airport, CO",    39.8466, -104.6562),
+    "KXHIGHPHIL": Station("Philadelphia Intl, PA",     39.8729, -75.2407),
     # PM.US tc-temp-* series (confirmed 2026-06-22)
     "pmus:nyc":  Station("Central Park, NY",            40.7829, -73.9654),
     "pmus:mdw":  Station("Chicago Midway Airport, IL",  41.7868, -87.7522),

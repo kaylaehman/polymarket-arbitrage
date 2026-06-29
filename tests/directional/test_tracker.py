@@ -506,7 +506,8 @@ async def test_pmus_pnl_math_no_wins(tmp_path):
 
     assert row is not None
     assert row[1] == "closed"
-    expected_pnl = (1.0 - entry) * size  # = 17.0
+    from core.kalshi_fees import fee_per_contract
+    expected_pnl = (1.0 - entry) * size - fee_per_contract(entry) * size  # net of fee
     assert abs(row[0] - expected_pnl) < 1e-6, f"Expected {expected_pnl}, got {row[0]}"
 
 
@@ -525,5 +526,91 @@ async def test_pmus_pnl_math_no_loses(tmp_path):
 
     assert row is not None
     assert row[1] == "closed"
-    expected_pnl = (0.0 - entry) * size  # = -3.0
+    from core.kalshi_fees import fee_per_contract
+    expected_pnl = (0.0 - entry) * size - fee_per_contract(entry) * size  # net of fee
     assert abs(row[0] - expected_pnl) < 1e-6, f"Expected {expected_pnl}, got {row[0]}"
+
+
+@pytest.mark.asyncio
+async def test_kalshi_resolution_net_of_fees(tmp_path):
+    """A held-to-resolution Kalshi NO win settles NET of the entry fee."""
+    from core.kalshi_fees import fee_per_contract
+    store = DirectionalStore(str(tmp_path / "d.db"))
+    store.init_schema()
+    entry, size = 0.93, 8
+    store.record_position(DirectionalPosition(
+        market_id="kalshi:KXHIGHNY-26JUN23-B78", side="NO", entry_price=entry, size=size,
+        strategy="maker_longshot", mode="paper", opened_at=datetime(2026, 6, 18),
+        stop_loss=None, take_profit=None, notional=entry * size, status="open",
+    ))
+    kalshi_client = MagicMock()
+    kalshi_client.get_market = AsyncMock(return_value=MagicMock(result="no"))  # NO wins
+    rm = MagicMock(); rm.state.kill_switch_triggered = False
+    tracker = Tracker(store=store, kalshi_client=kalshi_client,
+                      executor=MagicMock(), risk_manager=rm)
+    await tracker.sweep(now=datetime(2026, 6, 29, 12, 0, 0))
+
+    import sqlite3
+    conn = sqlite3.connect(str(tmp_path / "d.db"))
+    pnl = conn.execute("SELECT realized_pnl FROM directional_positions LIMIT 1").fetchone()[0]
+    conn.close()
+    gross = (1.0 - entry) * size
+    expected = gross - fee_per_contract(entry) * size
+    assert abs(pnl - expected) < 1e-6
+    assert pnl < gross  # fee actually reduced it
+
+
+# ── settle alert (P/L of the bet + overall) ─────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_settle_alert_fires_with_pnl(tmp_path, monkeypatch):
+    """On settlement the tracker fires a notification with this bet's P/L and the
+    overall realized P/L."""
+    import asyncio
+    from core import alerts as alerts_mod
+    calls = []
+    async def fake_notify(*a, **k):
+        calls.append((a, k))
+    monkeypatch.setattr(alerts_mod, "notify", fake_notify)
+    monkeypatch.setattr(alerts_mod, "_ALERTER", object())  # pass the configured guard
+
+    store = DirectionalStore(str(tmp_path / "d.db")); store.init_schema()
+    store.record_position(DirectionalPosition(
+        market_id="kalshi:KXHIGHNY-26JUN23-B78", side="NO", entry_price=0.93, size=8,
+        strategy="maker_longshot", mode="paper", opened_at=datetime(2026, 6, 18),
+        stop_loss=None, take_profit=None, notional=7.44, status="open"))
+    kc = MagicMock(); kc.get_market = AsyncMock(return_value=MagicMock(result="no"))  # NO wins
+    rm = MagicMock(); rm.state.kill_switch_triggered = False
+    tr = Tracker(store=store, kalshi_client=kc, executor=MagicMock(), risk_manager=rm)
+    await tr.sweep(now=datetime(2026, 6, 29, 12, 0, 0))
+    await asyncio.sleep(0.05)  # let the fire-and-forget alert task run
+
+    settle = [c for c in calls if c[0] and c[0][0] == "directional_settled"]
+    assert settle, "a settle alert must fire on resolution"
+    body = settle[0][0][2]
+    assert "WON" in body and "Overall realized P&L" in body
+
+
+@pytest.mark.asyncio
+async def test_settle_alert_skips_multi_outcome(tmp_path, monkeypatch):
+    """multi_outcome legs don't fire a settle alert (no place alert either; avoids spam)."""
+    import asyncio
+    from core import alerts as alerts_mod
+    calls = []
+    async def fake_notify(*a, **k):
+        calls.append((a, k))
+    monkeypatch.setattr(alerts_mod, "notify", fake_notify)
+    monkeypatch.setattr(alerts_mod, "_ALERTER", object())
+
+    store = DirectionalStore(str(tmp_path / "d.db")); store.init_schema()
+    store.record_position(DirectionalPosition(
+        market_id="kalshi:KXFEDDECISION-26JUL-H", side="YES", entry_price=0.30, size=8,
+        strategy="multi_outcome", mode="paper", opened_at=datetime(2026, 6, 18),
+        stop_loss=None, take_profit=None, notional=2.40, status="open"))
+    kc = MagicMock(); kc.get_market = AsyncMock(return_value=MagicMock(result="yes"))
+    rm = MagicMock(); rm.state.kill_switch_triggered = False
+    tr = Tracker(store=store, kalshi_client=kc, executor=MagicMock(), risk_manager=rm)
+    await tr.sweep(now=datetime(2026, 6, 29, 12, 0, 0))
+    await asyncio.sleep(0.05)
+
+    assert not [c for c in calls if c[0] and c[0][0] == "directional_settled"]
