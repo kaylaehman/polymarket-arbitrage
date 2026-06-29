@@ -105,7 +105,7 @@ risk:
 
 mode:
   # Trading mode: "live" or "dry_run"
-  trading_mode: "live"
+  trading_mode: "dry_run"
   
   # Data mode: "real" or "simulation"
   # - "real": Fetch actual order books from Polymarket CLOB API
