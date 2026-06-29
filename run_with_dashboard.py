@@ -555,6 +555,8 @@ class TradingBotWithDashboard:
                 loops = [self._monitor_cross_platform_arbs()]
                 if self.config.mode.kalshi_native_enabled:
                     loops.append(self._run_kalshi_trading())
+                if getattr(self.config.mode, "kalshi_multi_outcome_enabled", False):
+                    loops.append(self._run_kalshi_multi_outcome())
                 await asyncio.gather(*loops)
     
     async def _run_matching_background(self, polymarket_markets: list) -> None:
@@ -855,6 +857,16 @@ class TradingBotWithDashboard:
         prev_mode = "rest"
 
         while self._running:
+            # Reconcile risk exposure to REAL Kalshi positions each sweep so the
+            # per-market cap stays honest — releases resolved positions and corrects
+            # the optimistic reservations made at placement (prevents the one-sided
+            # bundle accumulation that occurred 2026-06-29).
+            try:
+                real_exp = await self.kalshi_client.get_real_market_exposures()
+                self.risk_manager.sync_market_exposures(real_exp)
+            except Exception as _rec_err:
+                logger.debug("[risk-reconcile] failed (continuing): %s", _rec_err)
+
             found = 0
             for km in watched:
                 if not self._running:
@@ -921,6 +933,172 @@ class TradingBotWithDashboard:
                 else poll
             )
             await asyncio.sleep(sweep_interval)
+
+    async def _run_kalshi_multi_outcome(self) -> None:
+        """Multi-outcome mutually-exclusive Kalshi arb — DETECT + ALERT only (#3).
+
+        Within a Kalshi event flagged ``mutually_exclusive`` exactly one market
+        resolves YES, so buying 1 YES on every market costs ``sum(yes_ask)`` and
+        pays back exactly $1.  When that sum (plus per-leg fees) is under $1 it is
+        a riskless underround.  This loop scans the priority series' open events,
+        prices every leg from its live orderbook, and surfaces any lock to the
+        dashboard + Discord.  It does NOT place orders — completing a multi-leg
+        cover safely needs all-or-nothing fill handling (a deliberate follow-up).
+        """
+        if not self.kalshi_client:
+            return
+        from core.kalshi_multi_outcome import OutcomeLeg, detect_multi_outcome_arb
+
+        # Scan ALL priority series — weather + macro/financial.  Most macro/financial
+        # series (CPI/PCE/daily-BTC/WTI/GDP) are THRESHOLD markets (not
+        # mutually-exclusive) and are skipped by the `mutually_exclusive` filter
+        # below; the genuine bracket cases are weather (~6 legs), KXFEDDECISION
+        # (~5 legs) and KXEURUSD (~15 legs).  The MAX_LEGS guard cheaply drops the
+        # giant price-range ladders (KXBTC/KXETH, 50-188 legs) whose per-leg
+        # ceil-to-cent fees can never be cleared — using the leg count from the
+        # events response, before any orderbook pricing.
+        series = []
+        try:
+            series = list(self.config.directional.scanner.priority_series or [])
+        except Exception:
+            series = ["KXHIGHNY", "KXHIGHCHI", "KXHIGHLAX", "KXHIGHMIA"]
+        max_legs = 16
+
+        min_edge = float(getattr(self.config.trading, "min_edge", 0.01))
+        poll = max(float(getattr(self.config.monitoring, "kalshi_poll_seconds", 30)) * 2, 60.0)
+        logger.info(
+            f"Kalshi multi-outcome arb scan started (DETECT + PAPER, no live orders): "
+            f"{len(series)} series, every {poll:.0f}s, min_edge={min_edge}"
+        )
+
+        while self._running:
+            found = 0
+            for s in series:
+                if not self._running:
+                    break
+                try:
+                    data = await self.kalshi_client._get(
+                        "/events",
+                        params={"series_ticker": s, "status": "open",
+                                "with_nested_markets": "true", "limit": 20},
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.debug(f"[MultiOutcome] events fetch failed for {s}: {e}")
+                    continue
+
+                for ev in (data or {}).get("events", []):
+                    if not ev.get("mutually_exclusive"):
+                        continue
+                    event_ticker = ev.get("event_ticker", "")
+                    markets = ev.get("markets", []) or []
+                    # Skip giant ladders cheaply (no orderbook calls): their per-leg
+                    # fees can't be cleared and pricing them every sweep is costly.
+                    if len(markets) < 2 or len(markets) > max_legs:
+                        continue
+
+                    legs = []
+                    complete = True
+                    for m in markets:
+                        ticker = m.get("ticker", "")
+                        try:
+                            ob = await self.kalshi_client.get_orderbook_unified(ticker)
+                        except Exception:
+                            ob = None
+                        if ob is None:
+                            complete = False  # missing a market → can't assess the cover
+                            break
+                        # Price BOTH sides; the detector picks the YES underround or
+                        # the NO overround dual (whichever locks).
+                        legs.append(OutcomeLeg(
+                            ticker=ticker,
+                            yes_ask=ob.best_ask_yes,
+                            yes_ask_size=getattr(ob.yes, "best_ask_size", None),
+                            no_ask=ob.best_ask_no,
+                            no_ask_size=getattr(ob.no, "best_ask_size", None),
+                        ))
+                        await asyncio.sleep(0.05)
+                    if not complete:
+                        continue
+
+                    arb = detect_multi_outcome_arb(event_ticker, legs, min_edge=min_edge)
+                    if arb is None:
+                        continue
+
+                    found += 1
+                    logger.info(
+                        f"[MultiOutcome] RISKLESS LOCK {event_ticker} ({arb.side}-side): "
+                        f"{len(arb.legs)} legs cost={arb.cost_per_contract:.3f} "
+                        f"fees={arb.fees_per_contract:.3f} payout={arb.payout_per_cover:.2f} "
+                        f"net_edge={arb.net_edge_per_contract:.3f} "
+                        f"x{arb.contracts} = ${arb.total_profit:.2f}"
+                    )
+                    try:
+                        self.dashboard_integration.add_opportunity(
+                            opportunity_type="kalshi_multi_outcome",
+                            market_id=f"kalshi:{event_ticker}",
+                            edge=arb.net_edge_per_contract,
+                            suggested_size=float(arb.contracts),
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        from core import alerts as _alerts
+                        asyncio.create_task(_alerts.notify(
+                            "multi_outcome",
+                            "Multi-outcome riskless lock",
+                            f"{event_ticker} ({arb.side}-side): {len(arb.legs)} legs, "
+                            f"net edge {arb.net_edge_per_contract:.3f}/cover, "
+                            f"${arb.total_profit:.2f} on {arb.contracts} contracts",
+                            severity="warn",
+                            dedup_key=event_ticker,
+                        ))
+                    except Exception:
+                        pass
+
+                    # Paper-record the lock (buy 1 contract on every leg, on the
+                    # winning side) into the directional store so it tracks forward
+                    # P&L and settles via the existing tracker.  Dedup: skip if this
+                    # event already has an open multi_outcome leg.  strategy=
+                    # "multi_outcome" keeps it OUT of the longshot-NO breakdown.
+                    eng = self.directional_engine
+                    if eng is not None:
+                        try:
+                            from core.directional.models import DirectionalPosition
+                            from datetime import datetime, timezone
+                            prefix = f"kalshi:{event_ticker}-"
+                            already = any(
+                                p.market_id.startswith(prefix) and p.strategy == "multi_outcome"
+                                for p in eng.store.open_positions()
+                            )
+                            if not already:
+                                now = datetime.now(timezone.utc)
+                                for ticker, price in arb.legs:
+                                    eng.store.record_position(DirectionalPosition(
+                                        market_id=f"kalshi:{ticker}",
+                                        side=arb.side,
+                                        entry_price=price,
+                                        size=arb.contracts,
+                                        strategy="multi_outcome",
+                                        mode="paper",
+                                        opened_at=now,
+                                        stop_loss=None,
+                                        take_profit=None,
+                                        notional=round(price * arb.contracts, 4),
+                                        status="open",
+                                    ))
+                                logger.info(
+                                    f"[MultiOutcome] paper-recorded {len(arb.legs)} {arb.side} "
+                                    f"legs for {event_ticker} (x{arb.contracts})"
+                                )
+                        except Exception as e:
+                            logger.debug(f"[MultiOutcome] paper record failed: {e}")
+                await asyncio.sleep(0.2)
+
+            if found:
+                logger.info(f"[MultiOutcome] sweep found {found} riskless lock(s)")
+            await asyncio.sleep(poll)
 
     async def stop(self) -> None:
         """Stop everything gracefully."""

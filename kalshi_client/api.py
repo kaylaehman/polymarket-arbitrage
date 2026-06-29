@@ -272,38 +272,57 @@ class KalshiClient:
             self._simulated_orders[order_id] = order
             return order
 
-        price_cents = int(round(price * 100))
+        # ── V2 create-order mapping (POST /portfolio/events/orders) ──────────
+        # Kalshi retired the v1 POST /portfolio/orders (410 deprecated_v1_order_endpoint).
+        # The V2 endpoint expresses everything on the YES leg: side ∈ {bid,ask}
+        # (bid = buy YES, ask = sell YES), price is a fixed-point DOLLAR STRING for
+        # the YES leg, no yes/no or action fields. Buying a NO contract is therefore
+        # SELLING YES at the equivalent price (1 - no_price):
+        #   (YES, BUY)  -> bid @ price            (NO, BUY)  -> ask @ (1 - price)
+        #   (YES, SELL) -> ask @ price            (NO, SELL) -> bid @ (1 - price)
+        is_no = token_type == TokenType.NO
+        action_buy = side == OrderSide.BUY
+        yes_price = round((1.0 - price) if is_no else price, 4)
+        price_cents = int(round(yes_price * 100))
         if not 1 <= price_cents <= 99:
-            raise ValueError(f"Kalshi price must be 1-99 cents; got {price_cents} (from {price})")
+            raise ValueError(
+                f"Kalshi YES-leg price must be 1-99 cents; got {price_cents} "
+                f"(token={token_type.value} price={price} -> yes_price={yes_price})"
+            )
+        # bid = buy YES; buying NO inverts to ask (sell YES), and vice-versa.
+        kalshi_side = ("bid" if action_buy else "ask")
+        if is_no:
+            kalshi_side = "ask" if action_buy else "bid"
 
         body = {
             "ticker": ticker,
-            "client_order_id": order_id,
-            "type": "limit",
-            "action": "buy" if side == OrderSide.BUY else "sell",
-            "side": "yes" if token_type == TokenType.YES else "no",
-            "count": int(round(size)),
+            "client_order_id": str(uuid.uuid4()),
+            "side": kalshi_side,
+            "count": str(int(round(size))),
+            "price": f"{yes_price:.4f}",
+            "time_in_force": time_in_force or "good_till_canceled",
+            "self_trade_prevention_type": "taker_at_cross",
         }
-        # Kalshi prices each leg in its own field.
-        if token_type == TokenType.YES:
-            body["yes_price"] = price_cents
-        else:
-            body["no_price"] = price_cents
-        if time_in_force:
-            body["time_in_force"] = time_in_force
 
         try:
-            data = await self._signed_request("POST", "/portfolio/orders", json_data=body)
-            placed = data.get("order", {})
-            order.order_id = placed.get("order_id", order_id)
-            status = (placed.get("status") or "").lower()
-            order.status = {
-                "resting": OrderStatus.OPEN,
-                "executed": OrderStatus.FILLED,
-                "canceled": OrderStatus.CANCELLED,
-                "pending": OrderStatus.PENDING,
-            }.get(status, OrderStatus.OPEN)
-            logger.info(f"Kalshi order placed: {order.order_id} ({status or 'open'})")
+            data = await self._signed_request(
+                "POST", "/portfolio/events/orders", json_data=body
+            )
+            # V2 response is FLAT (no "order" wrapper, no "status" field): derive
+            # status from fill_count / remaining_count.
+            order.order_id = data.get("order_id", order_id)
+            fill = float(data.get("fill_count") or 0)
+            remaining = float(data.get("remaining_count") or 0)
+            if fill > 0 and remaining <= 0:
+                order.status = OrderStatus.FILLED
+            else:
+                # Resting (0 fill) or partially filled with a resting remainder.
+                order.status = OrderStatus.OPEN
+            logger.info(
+                f"Kalshi V2 order placed: {order.order_id} "
+                f"({kalshi_side} {body['count']}@{body['price']} "
+                f"fill={fill:g} rem={remaining:g})"
+            )
             return order
         except Exception as e:
             logger.error(f"Kalshi place_order failed: {e}")
@@ -318,7 +337,8 @@ class KalshiClient:
                 logger.info(f"[DRY RUN] Kalshi cancelled order: {order_id}")
             return
         try:
-            await self._signed_request("DELETE", f"/portfolio/orders/{order_id}")
+            # V2 path (old DELETE /portfolio/orders/{id} is 410 deprecated).
+            await self._signed_request("DELETE", f"/portfolio/events/orders/{order_id}")
             logger.info(f"Kalshi order cancelled: {order_id}")
         except Exception as e:
             logger.error(f"Kalshi cancel_order failed for {order_id}: {e}")
@@ -373,6 +393,31 @@ class KalshiClient:
         for o in data.get("orders", []):
             orders.append(self._parse_order(o))
         return [o for o in orders if o]
+
+    async def get_real_market_exposures(self) -> dict[str, float]:
+        """Return ``{market_id: $exposure}`` from LIVE Kalshi positions (signed).
+
+        Used to reconcile the risk manager's per-market exposure to reality each
+        sweep (releases resolved positions, corrects optimistic reservations).
+        Returns {} in dry_run or on any error (never raises).
+        """
+        if self.dry_run:
+            return {}
+        try:
+            data = await self._signed_request("GET", "/portfolio/positions")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("get_real_market_exposures failed: %s", exc)
+            return {}
+        out: dict[str, float] = {}
+        for p in (data or {}).get("market_positions", []):
+            ticker = p.get("ticker", "")
+            try:
+                exp = float(p.get("market_exposure_dollars", 0) or 0)
+            except (TypeError, ValueError):
+                exp = 0.0
+            if ticker and exp > 0:
+                out[f"kalshi:{ticker}"] = exp
+        return out
 
     async def get_positions(self) -> dict[str, dict[TokenType, Position]]:
         """
@@ -574,7 +619,11 @@ class KalshiClient:
             market = self._parse_market(m)
             if market:
                 markets.append(market)
-                self._markets_cache[market.ticker] = market
+                # Only cache RESOLVED markets (immutable). Caching an OPEN market
+                # here would let get_market() serve a stale active entry forever and
+                # block the tracker from ever seeing resolution — the stall bug.
+                if market.result is not None:
+                    self._markets_cache[market.ticker] = market
         
         next_cursor = data.get("cursor")
         return markets, next_cursor
@@ -746,10 +795,14 @@ class KalshiClient:
         Returns:
             KalshiMarket object or None if not found
         """
-        # Check cache first
-        if ticker in self._markets_cache:
-            return self._markets_cache[ticker]
-        
+        # Check cache first — but only trust RESOLVED entries.  A cached open
+        # market (result=None) may have finalized since; fall through and refetch
+        # so the tracker always sees settlement (defense in depth vs. any path
+        # that cached an active market).
+        cached = self._markets_cache.get(ticker)
+        if cached is not None and cached.result is not None:
+            return cached
+
         data = await self._get(f"/markets/{ticker}")
         if not data or "market" not in data:
             return None

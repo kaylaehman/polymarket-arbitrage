@@ -183,6 +183,18 @@ class RiskManager:
         
         self.state.last_check = datetime.utcnow()
     
+    def sync_market_exposures(self, exposures: dict[str, float]) -> None:
+        """Overwrite per-market exposure from an authoritative source (real Kalshi
+        positions), and recompute global exposure.
+
+        Releases reservations for markets no longer held (e.g. resolved positions),
+        so the per-market cap stays honest instead of over-blocking forever. Called
+        each sweep with the live positions map ``{market_id: exposure_dollars}``.
+        """
+        self._market_exposure = {k: float(v) for k, v in exposures.items() if float(v) > 0}
+        self.state.global_exposure = sum(self._market_exposure.values())
+        self.state.last_check = datetime.utcnow()
+
     def update_from_fill(self, trade: Trade) -> None:
         """Update risk state from a trade fill."""
         size_delta = trade.size if trade.side == OrderSide.BUY else -trade.size
