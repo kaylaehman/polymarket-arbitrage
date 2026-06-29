@@ -28,10 +28,23 @@ MACRO_SERIES: dict[str, str] = {
 _SUFFIX_RE = re.compile(r"-([TB])(-?\d+\.?\d*)$")
 
 _FRED_BASE = "https://api.stlouisfed.org/fred/series/observations"
-# Cleveland Fed CPI/PCE nowcast data URL — set once verified live (Task 3 Step 0).
-# Empty string => CPI/PCE nowcasts unavailable => gate safely skips those candidates.
-_CLEVELAND_CPI_URL = ""
-_CLEVELAND_PCE_URL = ""
+# Cleveland Fed inflation nowcast (FusionCharts JSON). The month-over-month file
+# carries the MoM CPI/Core-CPI/Core-PCE nowcast series used by the KXCPI/KXCPICORE/
+# KXPCECORE markets. (KXCPIYOY is year-over-year — not in this MoM file; it maps to
+# no series and safely returns None until YoY assembly is added — follow-up.)
+_CLEVELAND_MONTH_URL = (
+    "https://www.clevelandfed.org/-/media/files/webcharts/"
+    "inflationnowcasting/nowcast_month.json?sc_lang=en"
+)
+_CLEVELAND_CPI_URL = _CLEVELAND_MONTH_URL
+_CLEVELAND_PCE_URL = _CLEVELAND_MONTH_URL
+
+# indicator -> Cleveland Fed FusionCharts seriesname (MoM file).
+_CLEVELAND_SERIESNAME = {
+    "CPI": "CPI Inflation",
+    "CPICORE": "Core CPI Inflation",
+    "PCECORE": "Core PCE Inflation",
+}
 
 
 @dataclass(frozen=True)
@@ -145,7 +158,28 @@ class MacroNowcastClient:
 
 
 def _parse_cleveland_nowcast(resp: Any, indicator: str) -> Optional[float]:
-    """Extract the latest nowcast for `indicator` from the Cleveland Fed export.
-    Shape depends on the live-verified export format (CSV row / JSON field);
-    returns None until that endpoint is pinned (CPI/PCE then safely skip)."""
+    """Extract the latest nowcast for `indicator` from the Cleveland Fed MoM JSON.
+
+    Format: a list whose first element has a ``dataset`` of FusionCharts series
+    ``[{"seriesname": ..., "data": [{"value": "0.27", ...}, ...]}, ...]``. The
+    nowcast is the last non-empty ``value`` of the matching series. Returns None
+    for indicators with no MoM series (e.g. CPIYOY) or any shape mismatch.
+    """
+    name = _CLEVELAND_SERIESNAME.get(indicator)
+    if name is None:
+        return None
+    try:
+        data = resp.json()
+        dataset = data[0]["dataset"]
+    except (Exception,):  # noqa: BLE001
+        return None
+    for series in dataset:
+        if series.get("seriesname") == name:
+            vals = [d.get("value") for d in series.get("data", []) if d.get("value")]
+            if not vals:
+                return None
+            try:
+                return float(vals[-1])
+            except (TypeError, ValueError):
+                return None
     return None

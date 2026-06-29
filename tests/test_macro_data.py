@@ -79,3 +79,24 @@ async def test_nowcast_http_error_returns_none():
     http = MagicMock(); http.get = AsyncMock(side_effect=RuntimeError("boom"))
     c = MacroNowcastClient(http=http, fred_api_key="k")
     assert await c.nowcast("GDP") is None
+
+
+from core.macro_data import _parse_cleveland_nowcast
+
+def _cleveland_resp(series_data):
+    payload = [{"dataset": [{"seriesname": "CPI Inflation",
+                             "data": [{"value": ""}, {"value": "0.21"}, {"value": "0.27"}]},
+                            {"seriesname": "Core CPI Inflation",
+                             "data": [{"value": "0.30"}]}]}]
+    r = MagicMock(); r.json = MagicMock(return_value=payload)
+    return r
+
+def test_parse_cleveland_cpi_latest_value():
+    assert _parse_cleveland_nowcast(_cleveland_resp(None), "CPI") == pytest.approx(0.27)
+
+def test_parse_cleveland_core_cpi():
+    assert _parse_cleveland_nowcast(_cleveland_resp(None), "CPICORE") == pytest.approx(0.30)
+
+def test_parse_cleveland_cpiyoy_unavailable_returns_none():
+    # CPIYOY has no MoM series -> None (gate safely skips)
+    assert _parse_cleveland_nowcast(_cleveland_resp(None), "CPIYOY") is None
