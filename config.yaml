@@ -128,6 +128,14 @@ mode:
   kalshi_native_enabled: true
   kalshi_oracle_enabled: false
 
+  # Multi-outcome mutually-exclusive Kalshi arb (riskless underround across an
+  # event's brackets — weather, FOMC, EURUSD; giant BTC/ETH ladders auto-skipped).
+  # Scans every 60s, Discord-alerts each lock, and PAPER-records it (buy 1 YES on
+  # every leg) into the directional store for forward P&L. Still no LIVE orders —
+  # safe multi-leg live fills need all-or-nothing handling (a follow-up). Safe to
+  # enable: only reads orderbooks + writes paper. Off by default.
+  kalshi_multi_outcome_enabled: true
+
   # Polymarket.US venue. Disabled by default -- set to true + provide creds to enable.
   polymarket_us_enabled: true
   
@@ -230,9 +238,10 @@ directional:
   category_exclude: []            # e.g. [Weather, Esports]
 
   caps:
-    total_exposure: 30            # max total USD across all open directional positions
+    total_exposure: 200           # max total USD across all open directional positions (paper $ governor; raised 100->200 2026-06-29 so weather has room past the macro-clogged book)
     max_position: 8               # max USD per individual position
-    max_open: 4                   # max simultaneous open positions
+    max_open: 1000                # global count cap effectively OFF — per-bucket caps below govern
+    max_open_longshot: 4          # cap # of slow non-daily (longshot: macro/cable) bets; DAILY (weather) bets are UNCAPPED on count (per user 2026-06-29)
 
   safe_compounder:
     mode: paper                   # paper | live (live requires enabled: true above)
@@ -277,6 +286,9 @@ directional:
       - KXHIGHCHI   # Chicago
       - KXHIGHLAX   # Los Angeles
       - KXHIGHMIA   # Miami
+      - KXHIGHAUS   # Austin   (added 2026-06-24 — daily resolution, more samples)
+      - KXHIGHDEN   # Denver   (added 2026-06-24)
+      - KXHIGHPHIL  # Philadelphia (added 2026-06-24)
       # Macro: economic-release series validated in the 115-trade backtest
       - KXCPI         # US CPI (month-on-month)
       - KXCPIYOY      # US CPI (year-on-year)
@@ -343,6 +355,23 @@ directional:
     max_days: 30.0               # only fetch markets resolving within N days
     cache_ttl_seconds: 300.0     # PM.US fetch cache TTL (seconds)
 
+  # ── Macro nowcast gate (CPI/PCE/GDP) ─────────────────────────────────────────
+  # Keeps a NO longshot only when the Kalshi bucket/threshold is >= min_sigma σ
+  # from the Federal Reserve nowcast (Cleveland Fed CPI/PCE, GDPNow via FRED).
+  # Mirrors the weather/financial gates. Default OFF until paper-validated.
+  # Needs FRED_API_KEY in .env for GDPNow (free: fredaccount.stlouisfed.org/apikeys).
+  macro:
+    enabled: false
+    min_sigma: 2.0
+    require_data: true            # skip (don't bet blind) when nowcast unavailable
+    horizon_days: 45
+    sigma:                        # per-indicator surprise σ (percentage points)
+      CPI: 0.10
+      CPIYOY: 0.12
+      CPICORE: 0.10
+      PCECORE: 0.10
+      GDP: 0.40
+
 
 # ── Alerts ────────────────────────────────────────────────────────────────────
 # Push trade/kill-switch/position events to Discord and/or Telegram.
@@ -352,7 +381,7 @@ directional:
 #   ALERT_TELEGRAM_BOT_TOKEN=123456:ABC...
 #   ALERT_TELEGRAM_CHAT_ID=-100123456789
 alerts:
-  enabled: false                  # Set true to activate
+  enabled: true                   # ON 2026-06-29 — Discord #trading place + settle notifications
   cooldown_seconds: 60.0          # Min seconds between same (event_type, market) alerts
   min_severity: "info"            # Minimum severity to send: info | warn | critical
 

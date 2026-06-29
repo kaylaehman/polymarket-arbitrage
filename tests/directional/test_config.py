@@ -121,3 +121,27 @@ def test_valid_modes_do_not_raise(tmp_path):
     cfg = load_config(str(config_file))  # must not raise
     assert cfg.directional.ai_directional.mode == "live"
     assert cfg.directional.safe_compounder.mode == "paper"
+
+
+def test_macro_cfg_defaults_and_override(tmp_path):
+    import yaml
+    from utils.config_loader import load_config
+    cfg = {
+        "mode": {"trading_mode": "dry_run"},
+        "directional": {"enabled": True, "macro": {"enabled": True, "min_sigma": 2.0,
+                        "sigma": {"CPIYOY": 0.12, "GDP": 0.4}}},
+    }
+    p = tmp_path / "c.yaml"; p.write_text(yaml.safe_dump(cfg))
+    c = load_config(str(p))
+    assert c.directional.macro.enabled is True
+    assert c.directional.macro.min_sigma == 2.0
+    assert c.directional.macro.require_data is True          # default
+    assert c.directional.macro.sigma["CPIYOY"] == 0.12
+
+
+def test_macro_cfg_absent_defaults_disabled(tmp_path):
+    import yaml
+    from utils.config_loader import load_config
+    p = tmp_path / "c.yaml"; p.write_text(yaml.safe_dump({"mode": {"trading_mode": "dry_run"}}))
+    c = load_config(str(p))
+    assert c.directional.macro.enabled is False

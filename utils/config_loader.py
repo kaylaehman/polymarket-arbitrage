@@ -114,6 +114,12 @@ class ModeConfig:
     # and only place real orders in live mode.
     kalshi_native_enabled: bool = False
     kalshi_oracle_enabled: bool = False
+    # Multi-outcome mutually-exclusive Kalshi arb (riskless underround across an
+    # event's brackets: buy 1 YES on every leg when sum(yes_ask)+fees < $1).
+    # DETECT-ONLY + alert today — surfaces locks to the dashboard/Discord but
+    # does NOT place orders (safe multi-leg placement needs all-or-nothing fill
+    # handling). Default off; harmless no-op when disabled.
+    kalshi_multi_outcome_enabled: bool = False
     # Polymarket.US venue gate (disabled by default)
     polymarket_us_enabled: bool = False
     dry_run_initial_balance: float = 10000.0
@@ -207,7 +213,11 @@ class DirectionalCaps:
     """Position caps for the directional trading engine."""
     total_exposure: float = 30.0   # max total $ across all open directional positions
     max_position: float = 8.0      # max $ per individual position
-    max_open: int = 4              # max simultaneous open positions
+    max_open: int = 4              # max simultaneous open positions (global count cap)
+    # Count cap for LONGSHOT (non-daily, e.g. macro CPI/cable) open positions so
+    # slow multi-week bets don't crowd out fast daily ones (weather). Daily
+    # (weather) bets are exempt from this cap. None/negative = no longshot cap.
+    max_open_longshot: int = 4
 
 
 @dataclass
@@ -332,6 +342,19 @@ class FinancialCfg:
 
 
 @dataclass
+class MacroCfg:
+    """Fed-nowcast gate config for Kalshi macro markets (CPI/PCE/GDP)."""
+    enabled: bool = False
+    min_sigma: float = 2.0
+    require_data: bool = True
+    horizon_days: int = 45
+    fred_api_key_env: str = "FRED_API_KEY"
+    sigma: dict = field(default_factory=lambda: {
+        "CPI": 0.10, "CPIYOY": 0.12, "CPICORE": 0.10, "PCECORE": 0.10, "GDP": 0.40,
+    })
+
+
+@dataclass
 class DirectionalConfig:
     """Directional trading mode config. Disabled by default (additive)."""
     enabled: bool = False
@@ -350,6 +373,7 @@ class DirectionalConfig:
     weather: WeatherCfg = field(default_factory=WeatherCfg)
     financial: FinancialCfg = field(default_factory=FinancialCfg)
     pmus_weather: PMUSWeatherCfg = field(default_factory=PMUSWeatherCfg)
+    macro: MacroCfg = field(default_factory=MacroCfg)
 
 
 @dataclass
@@ -526,7 +550,8 @@ def _build_directional(data: dict) -> DirectionalConfig:
     weather = _build_dataclass(WeatherCfg, data.get("weather", {}) or {})
     financial = _build_dataclass(FinancialCfg, data.get("financial", {}) or {})
     pmus_weather = _build_dataclass(PMUSWeatherCfg, data.get("pmus_weather", {}) or {})
-    _sub = ("caps", "safe_compounder", "ai_directional", "maker_longshot", "scanner", "weather", "financial", "pmus_weather")
+    macro = _build_dataclass(MacroCfg, data.get("macro", {}) or {})
+    _sub = ("caps", "safe_compounder", "ai_directional", "maker_longshot", "scanner", "weather", "financial", "pmus_weather", "macro")
     top = {k: v for k, v in data.items() if k not in _sub}
     return _build_dataclass(DirectionalConfig, {
         **top,
@@ -538,6 +563,7 @@ def _build_directional(data: dict) -> DirectionalConfig:
         "weather": weather,
         "financial": financial,
         "pmus_weather": pmus_weather,
+        "macro": macro,
     })
 
 
