@@ -120,6 +120,20 @@ class DirectionalEngine:
                     sports_cfg=getattr(config, "sports", None),
                 ), ml_cfg)
             )
+        cd_cfg = getattr(config, "consensus_divergence", None)
+        if cd_cfg is not None and getattr(cd_cfg, "enabled", False):
+            from core.directional.strategies.consensus_divergence import ConsensusDivergenceStrategy
+            self._strategies.append(
+                (ConsensusDivergenceStrategy(
+                    min_divergence=cd_cfg.min_divergence,
+                    max_yes_price=cd_cfg.max_yes_price,
+                    min_yes_price=cd_cfg.min_yes_price,
+                    skip_categories=list(getattr(cd_cfg, "skip_categories", [])),
+                    sports_cfg=getattr(config, "sports", None),
+                    macro_cfg=getattr(config, "macro", None),
+                ), cd_cfg)
+            )
+
         self._weather_cfg = weather_cfg
         self._financial_cfg = getattr(config, "financial", None)
         self._macro_cfg = getattr(config, "macro", None)
@@ -326,6 +340,9 @@ class DirectionalEngine:
             elif strategy.name == "safe_compounder":
                 ctx = sc_ctx
                 strategy_markets = markets
+            elif strategy.name == "consensus_divergence":
+                ctx = sc_ctx
+                strategy_markets = maker_markets
             else:
                 ctx = {}  # AiDirectional needs no extra ctx
                 strategy_markets = markets

@@ -393,6 +393,16 @@ directional:
     cache_ttl_hours: 12.0
     max_calls_per_day: 12
 
+  # Consensus-divergence: paper directional bets on ~50/50 markets where a knowledge
+  # gate (sports book consensus / macro nowcast) disagrees with the market price.
+  # Complements maker_longshot (longshot-NO only). PAPER only.
+  consensus_divergence:
+    enabled: true
+    min_divergence: 0.12        # required |gate_prob - market_prob| to act
+    max_yes_price: 0.95
+    min_yes_price: 0.05
+    skip_categories: []
+
 
 # ── Alerts ────────────────────────────────────────────────────────────────────
 # Push trade/kill-switch/position events to Discord and/or Telegram.
