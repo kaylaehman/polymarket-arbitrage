@@ -43,6 +43,8 @@ class ConsensusDivergenceStrategy(Strategy):
     async def scan(self, markets: list, ctx: dict) -> list:
         candidates = []
         sports = ctx.get("sports")
+        n_inrange = 0      # markets with a usable yes_mid in [min_yes, max_yes]
+        n_gate_data = 0    # markets where a gate (sports/macro) returned a probability
         for m in markets:
             cat = getattr(m, "category", "")
             if cat in self._skip:
@@ -50,6 +52,7 @@ class ConsensusDivergenceStrategy(Strategy):
             yes_mid = float(getattr(m, "yes_price", 0) or 0)
             if not (self._min_yes <= yes_mid <= self._max_yes):
                 continue
+            n_inrange += 1
             sports_probs = None
             if sports is not None:
                 if kalshi_series_to_odds(m.ticker):
@@ -65,6 +68,7 @@ class ConsensusDivergenceStrategy(Strategy):
             if sports_probs:
                 p_gate = match_team(getattr(m, "yes_sub_title", "") or "", sports_probs)
                 if p_gate is not None:
+                    n_gate_data += 1
                     res = divergence_side(p_gate, yes_mid, self._min_div)
                     if res is not None:
                         side, edge = res
@@ -87,6 +91,7 @@ class ConsensusDivergenceStrategy(Strategy):
                     nowcast = await macro_client.nowcast(mm.indicator)
                     if nowcast is None:
                         continue
+                    n_gate_data += 1
                     z = (nowcast - mm.threshold) / (sigma * (2 ** 0.5))
                     p_gate = 0.5 * (1 + math.erf(z))
                     if mm.direction == "below":
@@ -104,4 +109,8 @@ class ConsensusDivergenceStrategy(Strategy):
                     ))
                 except Exception:
                     continue
+        logger.info(
+            "[consensus_divergence] funnel: %d markets, %d in yes-range, %d gate-data, %d candidates",
+            len(markets), n_inrange, n_gate_data, len(candidates),
+        )
         return candidates
