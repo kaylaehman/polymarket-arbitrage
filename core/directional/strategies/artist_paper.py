@@ -176,7 +176,7 @@ class ArtistPaperStrategy(Strategy):
             side=edge.side,
             market_price=market_price,
             ai_probability=edge.model_prob,
-            confidence=None,
+            confidence=getattr(edge, "confidence", 0.0),
             edge=abs(edge.edge),
             strategy=self.name,
             reasoning=(

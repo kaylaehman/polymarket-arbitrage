@@ -34,6 +34,7 @@ class ArtistEdge:
     prob_high: float
     market_price: float
     edge: float         # signed: model_prob - market_price
+    confidence: float = 0.0   # model confidence (for downstream Kelly sizing)
 
 
 def _normalize(name: str) -> str:
@@ -125,6 +126,7 @@ def compute_artist_edges(
             prob_high=prob_high,
             market_price=price,
             edge=raw_edge,
+            confidence=getattr(proj, "confidence", 0.0),
         ))
 
     edges.sort(key=lambda e: abs(e.edge), reverse=True)
