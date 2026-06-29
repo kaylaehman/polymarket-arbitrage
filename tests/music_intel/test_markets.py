@@ -83,3 +83,36 @@ async def test_discover_kalshi_filters_and_normalizes():
 @pytest.mark.asyncio
 async def test_discover_kalshi_none_client_empty():
     assert await discover_kalshi(None) == []
+
+
+@pytest.mark.asyncio
+async def test_discover_polymarket_prefixes_pm_venue():
+    http = MagicMock(); http.get = AsyncMock(return_value=_gamma_resp())
+    cands = await discover_polymarket(http)
+    assert cands  # fixture has music markets
+    assert all(c.market_id.startswith("pm:") for c in cands)
+
+
+@pytest.mark.asyncio
+async def test_gamma_resolution_yes_no_unresolved():
+    from music_intel.sources.markets import gamma_resolution
+    def _mk(closed, outcomes, prices):
+        r = MagicMock()
+        r.json = MagicMock(return_value={"closed": closed, "outcomes": outcomes, "outcomePrices": prices})
+        r.raise_for_status = MagicMock(); return r
+    # YES outcome won
+    http = MagicMock(); http.get = AsyncMock(return_value=_mk(True, '["Yes","No"]', '["1","0"]'))
+    assert await gamma_resolution(http, "pm:12345") == "yes"
+    # NO outcome won
+    http.get = AsyncMock(return_value=_mk(True, '["Yes","No"]', '["0","1"]'))
+    assert await gamma_resolution(http, "pm:12345") == "no"
+    # not closed -> None (unresolved)
+    http.get = AsyncMock(return_value=_mk(False, '["Yes","No"]', '["0.3","0.7"]'))
+    assert await gamma_resolution(http, "12345") is None
+
+
+@pytest.mark.asyncio
+async def test_gamma_resolution_error_returns_none():
+    http = MagicMock(); http.get = AsyncMock(side_effect=RuntimeError("gamma down"))
+    from music_intel.sources.markets import gamma_resolution
+    assert await gamma_resolution(http, "pm:1") is None
