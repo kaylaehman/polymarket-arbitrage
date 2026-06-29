@@ -116,6 +116,7 @@ class DirectionalEngine:
                     weather_cfg=weather_cfg,
                     financial_cfg=getattr(config, "financial", None),
                     macro_cfg=getattr(config, "macro", None),
+                    sports_cfg=getattr(config, "sports", None),
                 ), ml_cfg)
             )
         self._weather_cfg = weather_cfg
@@ -123,6 +124,9 @@ class DirectionalEngine:
         self._macro_cfg = getattr(config, "macro", None)
         self._macro_client = None  # process-lived MacroNowcastClient (lazy)
         self._macro_http = None
+        self._sports_cfg = getattr(config, "sports", None)
+        self._sports_client = None  # process-lived SportsOddsClient (lazy)
+        self._sports_http = None
 
         # PM.US weather source — config gated (default enabled=True)
         pmus_cfg = getattr(config, "pmus_weather", None)
@@ -206,6 +210,23 @@ class DirectionalEngine:
         self._macro_http = httpx.AsyncClient(timeout=10.0)
         self._macro_client = MacroNowcastClient(http=self._macro_http, fred_api_key=key)
 
+    def _ensure_sports_client(self) -> None:
+        """Lazily build the process-lived SportsOddsClient (The Odds API)."""
+        if self._sports_client is not None:
+            return
+        if self._sports_cfg is None or not self._sports_cfg.enabled:
+            return
+        import os
+        import httpx
+        from core.sports_data import SportsOddsClient
+        key = os.environ.get(getattr(self._sports_cfg, "odds_api_key_env", "ODDS_API_KEY"))
+        self._sports_http = httpx.AsyncClient(timeout=15.0)
+        self._sports_client = SportsOddsClient(
+            http=self._sports_http, api_key=key,
+            cache_ttl_s=int(getattr(self._sports_cfg, "cache_ttl_hours", 12.0) * 3600),
+            max_calls_per_day=getattr(self._sports_cfg, "max_calls_per_day", 12),
+        )
+
     async def close(self) -> None:
         """FIX C1: Close the process-lived AV HTTP client on engine shutdown."""
         if self._av_http is not None:
@@ -216,6 +237,10 @@ class DirectionalEngine:
             await self._macro_http.aclose()
             self._macro_http = None
             self._macro_client = None
+        if self._sports_http is not None:
+            await self._sports_http.aclose()
+            self._sports_http = None
+            self._sports_client = None
 
     def _build_sc_ctx(self) -> dict:
         """Build SafeCompounder context using scanner's already-fetched books.
@@ -255,6 +280,10 @@ class DirectionalEngine:
         self._ensure_macro_client()
         if self._macro_client is not None:
             sc_ctx = {**sc_ctx, "macro": self._macro_client}
+
+        self._ensure_sports_client()
+        if self._sports_client is not None:
+            sc_ctx = {**sc_ctx, "sports": self._sports_client}
 
         # MakerLongshotStrategy needs the full pre-cap liquid universe so that
         # near-term longshots (e.g. KXCABLEAVE-26MAY22-26JUL at index 114) are not

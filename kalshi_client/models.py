@@ -19,7 +19,8 @@ class KalshiMarket:
     series_ticker: str              # e.g., "KXHIGHNY"
     title: str                      # Full question
     subtitle: str = ""              # Additional context
-    
+    yes_sub_title: str = ""         # YES-side label (e.g. team name for futures)
+
     # Prices (in dollars, converted from cents)
     yes_price: float = 0.0          # Last YES price
     no_price: float = 0.0           # Last NO price

@@ -34,6 +34,7 @@ from core.directional.models import DirectionalCandidate
 from core.directional.strategies.base import Strategy
 from core.market_data import FinancialMarket, crossing_margin, parse_financial_ticker
 from core.macro_data import parse_macro_ticker, macro_threshold_keep, macro_bucket_keep
+from core.sports_data import kalshi_series_to_odds, match_team, sports_gate_keep
 from core.weather import (
     PMUSWeatherBucket,
     WeatherBucket,
@@ -79,6 +80,7 @@ class MakerLongshotStrategy(Strategy):
         weather_cfg: Optional[Any] = None,
         financial_cfg: Optional[Any] = None,
         macro_cfg: Optional[Any] = None,
+        sports_cfg: Optional[Any] = None,
     ) -> None:
         self._min_score = min_structural_score
         self._min_yes = min_yes_price
@@ -89,6 +91,7 @@ class MakerLongshotStrategy(Strategy):
         self._weather = weather_cfg  # WeatherCfg | None
         self._financial = financial_cfg  # FinancialCfg | None
         self._macro = macro_cfg  # MacroCfg | None
+        self._sports = sports_cfg  # SportsCfg | None
 
     @property
     def name(self) -> str:
@@ -268,6 +271,29 @@ class MakerLongshotStrategy(Strategy):
                     "KEEP" if keep else "SKIP")
         return keep
 
+    async def _apply_sports_gate(self, market, ctx: dict) -> bool:
+        """Return True to KEEP a sports-futures NO candidate; False to SKIP.
+        Keeps NO only when the de-vigged bookmaker consensus also says the team is
+        a longshot (<= max_prob). Ambiguous/missing match -> require_data decides."""
+        cfg = self._sports
+        client = ctx.get("sports")
+        if client is None:
+            return not cfg.require_data
+        try:
+            probs = await client.championship_probs(market.ticker)
+        except Exception:  # noqa: BLE001
+            probs = {}
+        if not probs:
+            return not cfg.require_data
+        team = getattr(market, "yes_sub_title", "") or getattr(market, "subtitle", "")
+        prob = match_team(team, probs)
+        if prob is None:
+            return not cfg.require_data
+        keep = sports_gate_keep(prob, cfg.max_prob)
+        logger.info("[sports-gate] %s team=%s consensus=%.3f max=%.3f -> %s",
+                    market.ticker, team, prob, cfg.max_prob, "KEEP" if keep else "SKIP")
+        return keep
+
     async def scan(
         self,
         markets: list[KalshiMarket],
@@ -373,6 +399,12 @@ class MakerLongshotStrategy(Strategy):
                 mm = parse_macro_ticker(market.ticker)
                 if mm is not None:
                     if not await self._apply_macro_gate(market, mm, delta_days, ctx):
+                        continue
+
+            # Sports consensus gate — KXNBA/KXMLB/KXNHL/KXNFL championship futures
+            if self._sports is not None and self._sports.enabled:
+                if kalshi_series_to_odds(market.ticker) is not None:
+                    if not await self._apply_sports_gate(market, ctx):
                         continue
 
             # Build non-marketable resting bid: strictly < no_ask

@@ -355,6 +355,23 @@ class MacroCfg:
 
 
 @dataclass
+class SportsCfg:
+    """The Odds API consensus gate for Kalshi championship-futures (KXNBA/MLB/NHL/NFL).
+
+    Keeps a NO longshot only when the de-vigged bookmaker consensus win probability
+    is <= max_prob. require_data: skip (don't bet blind) when consensus unavailable
+    or the team match is ambiguous. Free tier = 500 credits/month; the client caps
+    daily calls + caches to stay well under.
+    """
+    enabled: bool = False
+    max_prob: float = 0.10
+    require_data: bool = True
+    cache_ttl_hours: float = 12.0
+    max_calls_per_day: int = 12
+    odds_api_key_env: str = "ODDS_API_KEY"
+
+
+@dataclass
 class DirectionalConfig:
     """Directional trading mode config. Disabled by default (additive)."""
     enabled: bool = False
@@ -374,6 +391,7 @@ class DirectionalConfig:
     financial: FinancialCfg = field(default_factory=FinancialCfg)
     pmus_weather: PMUSWeatherCfg = field(default_factory=PMUSWeatherCfg)
     macro: MacroCfg = field(default_factory=MacroCfg)
+    sports: SportsCfg = field(default_factory=SportsCfg)
 
 
 @dataclass
@@ -551,7 +569,8 @@ def _build_directional(data: dict) -> DirectionalConfig:
     financial = _build_dataclass(FinancialCfg, data.get("financial", {}) or {})
     pmus_weather = _build_dataclass(PMUSWeatherCfg, data.get("pmus_weather", {}) or {})
     macro = _build_dataclass(MacroCfg, data.get("macro", {}) or {})
-    _sub = ("caps", "safe_compounder", "ai_directional", "maker_longshot", "scanner", "weather", "financial", "pmus_weather", "macro")
+    sports = _build_dataclass(SportsCfg, data.get("sports", {}) or {})
+    _sub = ("caps", "safe_compounder", "ai_directional", "maker_longshot", "scanner", "weather", "financial", "pmus_weather", "macro", "sports")
     top = {k: v for k, v in data.items() if k not in _sub}
     return _build_dataclass(DirectionalConfig, {
         **top,
@@ -564,6 +583,7 @@ def _build_directional(data: dict) -> DirectionalConfig:
         "financial": financial,
         "pmus_weather": pmus_weather,
         "macro": macro,
+        "sports": sports,
     })
 
 

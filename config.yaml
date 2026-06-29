@@ -372,6 +372,17 @@ directional:
       PCECORE: 0.10
       GDP: 0.40
 
+  # ── Sports consensus gate (championship futures) ─────────────────────────────
+  # Keeps a NO longshot only when the de-vigged bookmaker CONSENSUS (The Odds API
+  # outrights) also says the team is a longshot (<= max_prob). Needs ODDS_API_KEY
+  # in .env (free 500 credits/month). Caps daily calls + caches to stay under.
+  sports:
+    enabled: true
+    max_prob: 0.10
+    require_data: true
+    cache_ttl_hours: 12.0
+    max_calls_per_day: 12
+
 
 # ── Alerts ────────────────────────────────────────────────────────────────────
 # Push trade/kill-switch/position events to Discord and/or Telegram.

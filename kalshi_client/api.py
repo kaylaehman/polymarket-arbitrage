@@ -840,6 +840,7 @@ class KalshiClient:
                 series_ticker=data.get("series_ticker", ""),
                 title=data.get("title", ""),
                 subtitle=data.get("subtitle", ""),
+                yes_sub_title=data.get("yes_sub_title", ""),
                 yes_price=yes_price,
                 no_price=no_price,
                 status=data.get("status", ""),
