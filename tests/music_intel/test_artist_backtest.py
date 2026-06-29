@@ -54,3 +54,36 @@ def test_score_backtest_correct_and_rank():
     assert s2["correct"] is False and s2["winner_rank"] == 2
     s3 = score_backtest(res, "Beyonce")
     assert s3["correct"] is False and s3["winner_rank"] is None
+
+
+def test_summarize_sweep_counts_and_rates():
+    from music_intel.artist_backtest import summarize_sweep
+    pts = [
+        {"year":2024,"month":6,"correct":True,"winner_rank":1},
+        {"year":2023,"month":6,"correct":False,"winner_rank":2},
+        {"year":2022,"month":6,"correct":True,"winner_rank":1},
+        {"year":2022,"month":8,"correct":False,"winner_rank":None},
+    ]
+    s = summarize_sweep(pts)
+    assert s["n"] == 4 and s["hits"] == 2
+    assert s["hit_rate"] == pytest.approx(0.5)
+    assert s["avg_winner_rank"] == pytest.approx((1+2+1)/3)   # None excluded
+    assert s["winner_in_top3"] == pytest.approx(3/4)          # ranks 1,2,1 are <=3; None is not
+
+
+def test_summarize_sweep_empty():
+    from music_intel.artist_backtest import summarize_sweep
+    s = summarize_sweep([])
+    assert s["n"] == 0 and s["hit_rate"] == 0 and s["avg_winner_rank"] is None
+
+
+@pytest.mark.asyncio
+async def test_backtest_sweep_collects_points(monkeypatch):
+    import music_intel.artist_backtest as bt
+    async def fake_year(http, year, as_of_month=6, top_n=10):
+        if year == 2099: return None   # simulate a data gap
+        return {"year":year,"as_of":f"{year}-{as_of_month:02d}","model_top":"Taylor Swift",
+                "ranking":[("Taylor Swift",0.8),("Drake",0.2)],"ytd_leader":"Taylor Swift"}
+    monkeypatch.setattr(bt, "backtest_year", fake_year)
+    pts = await bt.backtest_sweep(MagicMock(), {2024:"Taylor Swift", 2099:"X"}, months=[6])
+    assert len(pts) == 1 and pts[0]["year"] == 2024 and pts[0]["correct"] is True

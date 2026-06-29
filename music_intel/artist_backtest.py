@@ -151,6 +151,77 @@ async def backtest_year(
     }
 
 
+async def backtest_sweep(
+    http,
+    year_winners: dict,
+    months: list = (4, 6, 8, 10),
+    top_n: int = 10,
+) -> list:
+    """Run backtest_year for every (year, month) combination and score results.
+
+    Args:
+        http: An httpx.AsyncClient (or compatible mock).
+        year_winners: Mapping of {year: actual_winner_name}.
+        months: Months to use as as_of_month for each year.
+        top_n: Passed to backtest_year.
+
+    Returns:
+        Flat list of scored points: each is a dict with keys
+        {"year", "month", "model_top", "actual_winner", "correct", "winner_rank"}.
+        (year, month) combos with no Wayback data are silently skipped.
+    """
+    points: list[dict] = []
+    for year, actual_winner in year_winners.items():
+        for month in months:
+            result = await backtest_year(http, year, as_of_month=month, top_n=top_n)
+            if result is None:
+                continue
+            scored = score_backtest(result, actual_winner)
+            points.append({
+                "year": year,
+                "month": month,
+                "model_top": scored["model_top"],
+                "actual_winner": actual_winner,
+                "correct": scored["correct"],
+                "winner_rank": scored["winner_rank"],
+            })
+    return points
+
+
+def summarize_sweep(points: list) -> dict:
+    """Summarize a list of scored backtest points.
+
+    Args:
+        points: List of dicts from backtest_sweep (each has "correct", "winner_rank").
+
+    Returns:
+        {
+            "n": total points,
+            "hits": count of correct predictions,
+            "hit_rate": hits / n (0 if n == 0),
+            "avg_winner_rank": mean winner_rank excluding None (or None if all None),
+            "winner_in_top3": fraction of points where winner_rank is not None and <= 3,
+        }
+    """
+    n = len(points)
+    hits = sum(1 for p in points if p.get("correct"))
+    hit_rate = hits / n if n > 0 else 0
+
+    ranked = [p["winner_rank"] for p in points if p.get("winner_rank") is not None]
+    avg_winner_rank = sum(ranked) / len(ranked) if ranked else None
+
+    in_top3 = sum(1 for p in points if p.get("winner_rank") is not None and p["winner_rank"] <= 3)
+    winner_in_top3 = in_top3 / n if n > 0 else 0
+
+    return {
+        "n": n,
+        "hits": hits,
+        "hit_rate": hit_rate,
+        "avg_winner_rank": avg_winner_rank,
+        "winner_in_top3": winner_in_top3,
+    }
+
+
 def score_backtest(result: dict, actual_winner: str) -> dict:
     """Score a backtest result against the known actual winner.
 
