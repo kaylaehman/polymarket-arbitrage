@@ -238,10 +238,10 @@ directional:
   category_exclude: []            # e.g. [Weather, Esports]
 
   caps:
-    total_exposure: 200           # max total USD across all open directional positions (paper $ governor; raised 100->200 2026-06-29 so weather has room past the macro-clogged book)
+    total_exposure: 100000        # paper cap REMOVED 2026-06-29 (per user: maximize sample count to validate accuracy faster; PAPER/dry_run so no real-money risk)
     max_position: 8               # max USD per individual position
-    max_open: 1000                # global count cap effectively OFF — per-bucket caps below govern
-    max_open_longshot: 4          # cap # of slow non-daily (longshot: macro/cable) bets; DAILY (weather) bets are UNCAPPED on count (per user 2026-06-29)
+    max_open: 100000              # count cap off
+    max_open_longshot: 100000     # longshot bucket cap off too — accumulate macro/cable/sports samples as fast as weather
 
   safe_compounder:
     mode: paper                   # paper | live (live requires enabled: true above)
@@ -416,3 +416,27 @@ catalyst:
     # - name: "Jobs Report"
     #   date: "2026-08-07T08:30:00"
     #   keywords: ["jobs", "nonfarm payroll", "employment", "unemployment"]
+
+# ── Music chart intelligence module (music_intel/) ──────────────────────────
+# Self-contained, ALERT-ONLY. Disabled by default. See music_intel/README.md.
+# This module never trades (ENABLE_CHART_EXECUTION is a future-seam, never flipped).
+music_intel:
+  enabled: false              # master switch (module is dormant until true)
+  charts: [hot100, billboard200]
+  # projection heuristics (Billboard's exact coefficients are NOT public — tunable)
+  stream_eu: 1250.0           # paid streams per chart unit
+  sale_eu: 1.0
+  airplay_per_unit: 0.0       # 0 until an airplay feed is wired
+  margin_k: 12.0              # logistic steepness: unit-margin -> P(#1)
+  # politeness
+  request_min_interval_s: 2.0
+  daily_call_cap: 500
+  alerts_enabled: true
+  edge:
+    base_threshold: 0.05      # min net edge at full confidence
+    threshold_conf_scale: 0.15  # extra edge demanded as confidence -> 0
+    confidence_floor: 0.25
+    min_liquidity: 100.0
+    max_days_to_resolution: 120.0
+    fee: 0.02
+    slippage: 0.01

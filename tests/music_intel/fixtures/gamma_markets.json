@@ -1,0 +1,98 @@
+[
+ {
+  "id": "2670649",
+  "question": "Will \"Drop Dead - Olivia Rodrigo\" be the Billboard Hot 100 #1 song for the week of July 4?",
+  "description": "Billboard updates its Hot 100 songs chart each Tuesday (with adjusted release schedules on some holiday weeks), reflecting data from the previous week (Friday-Thursday). Each Billboard chart is then titled \u201cWeek of (date of the upcoming Saturday)\u201d.\n\nThis market will resolve according to the number 1 song on the Billboard Hot 100 chart titled \u201cWeek of July 4, 2026\u201d.\n\nThis market will resolve as soon as the relevant chart is published. If the Billboard Hot 100 chart for the specified week is not published within 14 calendar days of the expected release date, this market will resolve to \u201cOther\u201d.\n\nThe resolution source for this market will be the official Billboard Hot 100 chart, published on the Billboard website (https://www.billboard.com/charts/hot-100/) or through other official Billboard channels.",
+  "outcomes": "[\"Yes\", \"No\"]",
+  "outcomePrices": "[\"0.0015\", \"0.9985\"]",
+  "clobTokenIds": "[\"76401927501030643490593328683106520444414598423778741219759587212832054301340\", \"51616740001243847484148300287148134965110819973941310121694696109859584848568\"]",
+  "liquidity": "6848.70213",
+  "endDate": "2026-06-30T23:59:00Z",
+  "closed": false,
+  "active": true
+ },
+ {
+  "id": "2696530",
+  "question": "Will \"Dandelion - Ella Langley\" be the Billboard 200 #1 album for the week of July 11?",
+  "description": "Billboard updates the Billboard 200 albums chart each Tuesday (with adjusted release schedules on some holiday weeks), reflecting data from the previous week (Friday-Thursday). Each Billboard chart is then dated \u201cWeek of (date of the upcoming Saturday)\u201d.\n\nThis market will resolve according to the number 1 album on the Billboard 200 chart dated \u201cWeek of July 11, 2026\u201d.\n\nThis market will resolve as soon as the relevant chart is published. If the Billboard 200 chart for the specified week is not published within 14 calendar days of the expected release date, this market will resolve to \u201cOther\u201d.\n\nThe resolution source for this market will be the Billboard 200 chart for the specified week, published on the Billboard website (https://www.billboard.com/charts/billboard-200/) or through other official Billboard channels.",
+  "outcomes": "[\"Yes\", \"No\"]",
+  "outcomePrices": "[\"0.006\", \"0.994\"]",
+  "clobTokenIds": "[\"100795612094296876063096378708522280375448516801997841264212166048586811206128\", \"39547793219166913139839867361283565153393351533137340929642340825306996137529\"]",
+  "liquidity": "786.22217",
+  "endDate": "2026-07-07T23:59:00Z",
+  "closed": false,
+  "active": true
+ },
+ {
+  "id": "2696510",
+  "question": "Will \"SWIM - BTS\" be the #1 song on Spotify this week?",
+  "description": "Spotify curates a playlist of the most streamed songs globally and updates it on Fridays to reflect streaming data for the previous week, beginning on the preceding Friday and ending on Thursday.\n\nThis market will resolve according to the most-streamed song globally on Spotify for the week labeled June 26.\n\nIf Spotify does not release its top song for the week labeled July 3 by July 4, 2026, 11:59 PM ET, this market will default to \"Other\".\n\nThe resolution source for this market will be official information from Spotify. The weekly top songs chart can be found on open.spotify.com under the \"Charts\" heading.",
+  "outcomes": "[\"Yes\", \"No\"]",
+  "outcomePrices": "[\"0.0285\", \"0.9715\"]",
+  "clobTokenIds": "[\"60401351917700604755276870814811691094430220538790246768291432802128614745501\", \"4397761545892783799648700359516719918880668802861719896446920689201321017349\"]",
+  "liquidity": "149.32433",
+  "endDate": "2026-07-03T23:59:00Z",
+  "closed": false,
+  "active": true
+ },
+ {
+  "id": "2696511",
+  "question": "Will \"The Cure - Olivia Rodrigo\" be the #1 song on Spotify this week?",
+  "description": "Spotify curates a playlist of the most streamed songs globally and updates it on Fridays to reflect streaming data for the previous week, beginning on the preceding Friday and ending on Thursday.\n\nThis market will resolve according to the most-streamed song globally on Spotify for the week labeled June 26.\n\nIf Spotify does not release its top song for the week labeled July 3 by July 4, 2026, 11:59 PM ET, this market will default to \"Other\".\n\nThe resolution source for this market will be official information from Spotify. The weekly top songs chart can be found on open.spotify.com under the \"Charts\" heading.",
+  "outcomes": "[\"Yes\", \"No\"]",
+  "outcomePrices": "[\"0.0235\", \"0.9765\"]",
+  "clobTokenIds": "[\"67627192504678441194212715283489511776321472005237679783683361763749093301554\", \"79785082278395380127876971620763740284728101826991036703684144454575573307131\"]",
+  "liquidity": "150.37631",
+  "endDate": "2026-07-03T23:59:00Z",
+  "closed": false,
+  "active": true
+ },
+ {
+  "id": "2696515",
+  "question": "Will \"Drop Dead - Olivia Rodrigo\" be the #1 song on Spotify this week?",
+  "description": "Spotify curates a playlist of the most streamed songs globally and updates it on Fridays to reflect streaming data for the previous week, beginning on the preceding Friday and ending on Thursday.\n\nThis market will resolve according to the most-streamed song globally on Spotify for the week labeled June 26.\n\nIf Spotify does not release its top song for the week labeled July 3 by July 4, 2026, 11:59 PM ET, this market will default to \"Other\".\n\nThe resolution source for this market will be official information from Spotify. The weekly top songs chart can be found on open.spotify.com under the \"Charts\" heading.",
+  "outcomes": "[\"Yes\", \"No\"]",
+  "outcomePrices": "[\"0.0235\", \"0.9765\"]",
+  "clobTokenIds": "[\"33017405848887074385249373951498521820917451161071507332565367832762778844908\", \"28469338141010367683194118244049170952338260718698763611661394761968702581679\"]",
+  "liquidity": "150.73608",
+  "endDate": "2026-07-03T23:59:00Z",
+  "closed": false,
+  "active": true
+ },
+ {
+  "id": "2696538",
+  "question": "Will \"The Wow! Signal - Muse\" be the Billboard 200 #1 album for the week of July 11?",
+  "description": "Billboard updates the Billboard 200 albums chart each Tuesday (with adjusted release schedules on some holiday weeks), reflecting data from the previous week (Friday-Thursday). Each Billboard chart is then dated \u201cWeek of (date of the upcoming Saturday)\u201d.\n\nThis market will resolve according to the number 1 album on the Billboard 200 chart dated \u201cWeek of July 11, 2026\u201d.\n\nThis market will resolve as soon as the relevant chart is published. If the Billboard 200 chart for the specified week is not published within 14 calendar days of the expected release date, this market will resolve to \u201cOther\u201d.\n\nThe resolution source for this market will be the Billboard 200 chart for the specified week, published on the Billboard website (https://www.billboard.com/charts/billboard-200/) or through other official Billboard channels.",
+  "outcomes": "[\"Yes\", \"No\"]",
+  "outcomePrices": "[\"0.0055\", \"0.9945\"]",
+  "clobTokenIds": "[\"18656264631847602780970281488626426445787326522241349734784476541144349745769\", \"110578988670467430647439787270838546594212284048267963351873616725599939651664\"]",
+  "liquidity": "794.71658",
+  "endDate": "2026-07-07T23:59:00Z",
+  "closed": false,
+  "active": true
+ },
+ {
+  "id": "2702911",
+  "question": "Blockx vs. Zverev: Match O/U 36.5",
+  "description": "This market refers to the tennis match between Alexander Blockx and Alexander Zverev in the Wimbledon ATP, originally scheduled for June 29, 2026 at 6:00AM ET.\nThis market will resolve to \"Over\" if the total number of games completed across all sets equals or exceeds 37. Otherwise, it will resolve to \"Under.\"\nAll tiebreaks\u2014including any Champions/Super tiebreak\u2014count as one (1) game toward the total.\nIf the match begins but is not completed, this market will resolve 50-50. If the match is canceled before play begins or delayed beyond 7 days from the scheduled date without a result, this market will also resolve 50-50.\nResolution will be based on official Grand Slam statistics.",
+  "outcomes": "[\"Over\", \"Under\"]",
+  "outcomePrices": "[\"0.45\", \"0.55\"]",
+  "clobTokenIds": "[\"40782575957311624577590742204892668913846377747410238205365255553985405408401\", \"91258819161525128206801563596642251158071342305289430607839043749090665028758\"]",
+  "liquidity": "5218.766",
+  "endDate": "2026-07-06T10:00:00Z",
+  "closed": false,
+  "active": true
+ },
+ {
+  "id": "2720520",
+  "question": "Map Handicap: TH (-1.5) vs All Gamers (+1.5)",
+  "description": "This market refers to the Valorant match between Team Heretics and All Gamers in the Esports World Cup Group D, initially scheduled for July 3 at 7:00AM ET.\n\nThis market will resolve to \"Team Heretics\" if Team Heretics wins 2 or more maps than All Gamers in this match.\n\nOtherwise, this market will resolve to \"All Gamers\". \n\nMaps won by forfeit, disqualification, walkover, or default are counted towards the handicap, provided that the match is completed.\n\nIf the match is canceled (not played at all for any reason), ends in a tie, or is delayed beyond 7 days from the scheduled date without a winner determined, this market will resolve to 50-50. \n\nIf the match begins but is not completed, and one team wins due to the opponent's match forfeiture, disqualification, or walkover, this market will resolve to 50-50. \n\nIf the match ends due to the clinching map being forfeited this will count as a completed match.\n\nThe resolution source for this market will be official information from https://vlr.gg. However, if https://vlr.gg has not published final results within 2 hours after the event\u2019s conclusion, a consensus of credible reporting may be used instead including video evidence.",
+  "outcomes": "[\"Team Heretics\", \"All Gamers\"]",
+  "outcomePrices": "[\"0.48\", \"0.52\"]",
+  "clobTokenIds": "[\"17910668242877251803689586189302828849362552300806208361671594003418208698727\", \"34483449236098992057957776254339814456518921394308136493828868015228728554956\"]",
+  "liquidity": "336.1175",
+  "endDate": "2026-07-03T17:00:00Z",
+  "closed": false,
+  "active": true
+ }
+]
