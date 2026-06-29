@@ -165,63 +165,107 @@ class ExecutionEngine:
         else:
             logger.warning(f"Unknown signal action: {signal.action}")
     
+    @staticmethod
+    def _valid_kalshi_price(price: float) -> bool:
+        """A tradable Kalshi price is 1-99 cents. A leg outside this would fail at
+        the client (e.g. ValueError on a 0-cent price); validate it up front so a
+        bad leg can't slip through while its bundle partner is placed."""
+        return 1 <= round(price * 100) <= 99
+
+    def _rollback_reservations(self, reserved: list) -> None:
+        """Release exposure reserved during a (now-aborted) atomic placement."""
+        for market_id, token_type, size, price in reserved:
+            self.risk_manager.update_position(market_id, token_type, -size, price)
+
     async def _handle_place_orders(self, signal: Signal) -> None:
-        """Handle a place_orders signal."""
+        """Place a multi-leg signal ATOMICALLY (all-or-nothing).
+
+        Real-money safety (2026-06-29 one-sided-fill incident): bundle legs used to
+        be placed independently, so one leg failing left a one-sided directional
+        position, and exposure was never reserved so the per-market cap was
+        toothless and the arb re-fired every 5s accumulating to $48.
+
+        Now: (1) validate EVERY leg (slippage, Kalshi price range, risk) before
+        placing ANY — if one fails, place none; (2) reserve each BUY leg's exposure
+        as it validates, so the per-market cap binds across legs AND across
+        re-fires; (3) if a leg fails to place after validation, cancel the legs
+        already placed and roll back all reservations.
+        """
+        reserved: list = []   # (market_id, token_type, size, price) for rollback
+        specs: list = []      # validated (token_type, side, price, size, strategy_tag)
+
+        # ── Pass 1: validate ALL legs atomically ──────────────────────────────
         for order_spec in signal.orders:
-            try:
-                # Extract order parameters
-                token_type = order_spec["token_type"]
-                side = order_spec["side"]
-                price = order_spec["price"]
-                size = order_spec["size"]
-                strategy_tag = order_spec.get("strategy_tag", "")
+            token_type = order_spec["token_type"]
+            side = order_spec["side"]
+            price = order_spec["price"]
+            size = order_spec["size"]
+            strategy_tag = order_spec.get("strategy_tag", "")
 
-                # Kelly sizing override (FEAT-05): only when enabled AND the
-                # opportunity carries an AI signal. Disabled by default.
-                if self.config.kelly_enabled and signal.opportunity is not None:
-                    size = self._kelly_size(signal.opportunity, fallback_size=size)
+            if self.config.kelly_enabled and signal.opportunity is not None:
+                size = self._kelly_size(signal.opportunity, fallback_size=size)
 
-                # Check slippage if enabled
-                if self.config.enable_slippage_check and signal.opportunity:
-                    if not self._check_slippage(signal.opportunity, order_spec):
-                        self.stats.slippage_rejections += 1
-                        logger.warning(f"Order rejected due to slippage: {order_spec}")
-                        continue
-                
-                # Check risk limits
-                proposed_order = Order(
-                    order_id="temp",
-                    market_id=signal.market_id,
-                    token_type=token_type,
-                    side=side,
-                    price=price,
-                    size=size,
-                    strategy_tag=strategy_tag,
-                )
-                
-                if not self.risk_manager.check_order(proposed_order):
-                    self.stats.signals_rejected += 1
-                    logger.warning(f"Order rejected by risk manager: {order_spec}")
-                    continue
-                
-                # Place the order
-                order = await self._place_order(
-                    market_id=signal.market_id,
-                    token_type=token_type,
-                    side=side,
-                    price=price,
-                    size=size,
-                    strategy_tag=strategy_tag,
-                )
-                
-                if order:
-                    self._track_order(order)
-                    self.stats.orders_placed += 1
-                    self.stats.total_notional += order.notional
-                    
-            except Exception as e:
-                logger.error(f"Failed to place order: {e}")
+            if self.config.enable_slippage_check and signal.opportunity:
+                if not self._check_slippage(signal.opportunity, order_spec):
+                    self.stats.slippage_rejections += 1
+                    logger.warning("[atomic] slippage rejection -> placing NONE of %d legs", len(signal.orders))
+                    self._rollback_reservations(reserved)
+                    return
+
+            if not self._valid_kalshi_price(price):
                 self.stats.orders_rejected += 1
+                logger.warning("[atomic] leg price %.4f out of 1-99c range -> placing NONE of %d legs",
+                               price, len(signal.orders))
+                self._rollback_reservations(reserved)
+                return
+
+            proposed_order = Order(
+                order_id="temp", market_id=signal.market_id, token_type=token_type,
+                side=side, price=price, size=size, strategy_tag=strategy_tag,
+            )
+            if not self.risk_manager.check_order(proposed_order):
+                self.stats.signals_rejected += 1
+                logger.warning("[atomic] risk rejection on %s -> placing NONE of %d legs",
+                               signal.market_id, len(signal.orders))
+                self._rollback_reservations(reserved)
+                return
+
+            # Reserve BUY exposure so the next leg + future re-fires see it and the
+            # per-market cap binds (the missing piece that let it accumulate to $48).
+            if side == OrderSide.BUY:
+                self.risk_manager.update_position(signal.market_id, token_type, size, price)
+                reserved.append((signal.market_id, token_type, size, price))
+            specs.append((token_type, side, price, size, strategy_tag))
+
+        # ── Pass 2: place all validated legs (unwind on any failure) ──────────
+        placed: list = []
+        for token_type, side, price, size, strategy_tag in specs:
+            try:
+                order = await self._place_order(
+                    market_id=signal.market_id, token_type=token_type, side=side,
+                    price=price, size=size, strategy_tag=strategy_tag,
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.error("[atomic] leg placement raised after validation: %s", e)
+                order = None
+
+            if order:
+                self._track_order(order)
+                self.stats.orders_placed += 1
+                self.stats.total_notional += order.notional
+                placed.append(order)
+            else:
+                # Partial placement is not riskless — unwind placed legs + reservations.
+                for p in placed:
+                    try:
+                        await self.client.cancel_order(p.order_id)
+                    except Exception:  # noqa: BLE001
+                        pass
+                self._rollback_reservations(reserved)
+                self.stats.orders_rejected += 1
+                logger.error("[atomic] partial placement -> cancelled %d placed leg(s) + rolled back reservation",
+                             len(placed))
+                return
     
     async def _handle_cancel_orders(self, signal: Signal) -> None:
         """Handle a cancel_orders signal."""
