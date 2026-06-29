@@ -44,6 +44,8 @@ class ConsensusDivergenceStrategy(Strategy):
         candidates = []
         sports = ctx.get("sports")
         n_inrange = 0      # markets with a usable yes_mid in [min_yes, max_yes]
+        n_sports_elig = 0  # in-range markets whose ticker maps to a sports odds key
+        n_macro_elig = 0   # in-range markets whose ticker parses as a macro market
         n_gate_data = 0    # markets where a gate (sports/macro) returned a probability
         for m in markets:
             cat = getattr(m, "category", "")
@@ -53,6 +55,10 @@ class ConsensusDivergenceStrategy(Strategy):
             if not (self._min_yes <= yes_mid <= self._max_yes):
                 continue
             n_inrange += 1
+            if kalshi_series_to_odds(m.ticker) or kalshi_game_series_to_odds(m.ticker):
+                n_sports_elig += 1
+            elif parse_macro_ticker(m.ticker) is not None:
+                n_macro_elig += 1
             sports_probs = None
             if sports is not None:
                 if kalshi_series_to_odds(m.ticker):
@@ -110,7 +116,8 @@ class ConsensusDivergenceStrategy(Strategy):
                 except Exception:
                     continue
         logger.info(
-            "[consensus_divergence] funnel: %d markets, %d in yes-range, %d gate-data, %d candidates",
-            len(markets), n_inrange, n_gate_data, len(candidates),
+            "[consensus_divergence] funnel: %d markets, %d in yes-range "
+            "(%d sports-elig, %d macro-elig), %d gate-data, %d candidates",
+            len(markets), n_inrange, n_sports_elig, n_macro_elig, n_gate_data, len(candidates),
         )
         return candidates
