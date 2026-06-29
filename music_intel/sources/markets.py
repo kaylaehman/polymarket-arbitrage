@@ -14,11 +14,17 @@ logger = logging.getLogger(__name__)
 
 _GAMMA_DEFAULT = "https://gamma-api.polymarket.com"
 
-MUSIC_KEYWORDS = re.compile(
-    r"billboard|hot ?100|billboard ?200|number one|#1|chart|spotify|apple music|"
-    r"album of|song of",
-    re.IGNORECASE,
+# A music-chart resolution needs a music-DOMAIN anchor (a named chart/platform),
+# not just a bare "#1" or "chart" — those leak in stock "price charts", "#1 seed"
+# sports markets, "top Netflix movie", etc.
+_MUSIC_ANCHOR = re.compile(
+    r"billboard|hot ?100|billboard ?200|spotify|apple music|luminate", re.IGNORECASE,
 )
+# Plus a chart-position word OR a music noun, to reject e.g. "Spotify stock hits $X".
+_RANK_WORD = re.compile(r"#\s*1\b|\bnumber one\b|\bno\.?\s*1\b|\btop\b", re.IGNORECASE)
+_MUSIC_NOUN = re.compile(r"\bsong\b|\balbum\b|\btrack\b|\bsingle\b", re.IGNORECASE)
+# Markets name the contender as "Title - Artist" in quotes (straight or curly).
+_QUOTED = re.compile(r"[\"“”']([^\"“”']+)[\"“”']")
 
 
 @dataclass
@@ -34,9 +40,33 @@ class MarketCandidate:
 
 
 def is_music_market(question: Optional[str], description: Optional[str] = None) -> bool:
-    """True when the question/description mentions a music-chart resolution."""
+    """True when the question/description resolves on a MUSIC chart.
+
+    Requires a music-domain anchor (Billboard / Spotify / Apple Music / Luminate)
+    AND a chart-position word or music noun — so non-music look-alikes ("price
+    chart", "#1 seed", "top global Netflix movie") are excluded.
+    """
     blob = f"{question or ''} {description or ''}"
-    return bool(MUSIC_KEYWORDS.search(blob))
+    if not _MUSIC_ANCHOR.search(blob):
+        return False
+    return bool(_RANK_WORD.search(blob) or _MUSIC_NOUN.search(blob))
+
+
+def parse_market_target(question: Optional[str]) -> tuple[str, str]:
+    """Extract the (artist, title) a market names, from a quoted ``"Title - Artist"``.
+
+    Returns ``("", "")`` for artist-level questions with no quoted track
+    (e.g. "Will Taylor Swift be #1 on the Hot 100?"). The title may contain
+    spaces/punctuation; the artist is the segment after the LAST " - ".
+    """
+    m = _QUOTED.search(question or "")
+    if not m:
+        return ("", "")
+    inner = m.group(1).strip()
+    if " - " not in inner:
+        return ("", "")
+    title, _, artist = inner.rpartition(" - ")
+    return (artist.strip(), title.strip())
 
 
 def _parse_json_list(val: Any) -> list:

@@ -101,3 +101,40 @@ def test_chart_signal_to_market_signal_is_tagged():
     ms = sig.to_market_signal()
     assert ms.reasoning.startswith("[chart-intel]")
     assert ms.ai_probability == 0.8 and ms.direction == "bullish"
+
+
+# ── REGRESSION: market names a SPECIFIC track, not just the artist ───────────
+
+@pytest.mark.asyncio
+async def test_named_track_absent_from_chart_no_false_edge():
+    # Live bug: market names "Drop Dead - Olivia Rodrigo" (NOT charting), priced ~0.
+    # The engine used to match the ARTIST and project her best-charting song
+    # ("stupid song") -> a huge bogus YES edge. The fix projects the NAMED track;
+    # absent from the chart -> ~0 prob / low confidence -> NO signal.
+    recs = [_rec("Ella Langley", "Choosin' Texas", 11_000_000),
+            _rec("Olivia Rodrigo", "stupid song", 11_000_000),   # different song!
+            _rec("Drake", "Janice", 7_000_000)] + \
+           [_rec(f"D{i}", "x", 1_000_000) for i in range(7)]
+    sink = CollectingSink()
+    async def discover():
+        return [_market(0.0015,
+                        q='Will "Drop Dead - Olivia Rodrigo" be the Billboard Hot 100 #1 song?')]
+    eng = MusicIntelEngine([_Src(recs)], discover, alert_sink=sink)
+    res = await eng.run_once("hot100", as_of=D)
+    assert res.signals == []      # no spurious edge from the wrong song
+    assert sink.alerts == []
+
+
+@pytest.mark.asyncio
+async def test_named_track_that_leads_chart_still_edges():
+    # Positive control: the market names the actual chart leader, cheaply priced
+    # -> a genuine YES edge must still fire (the fix doesn't kill real signals).
+    recs = [_rec("Ella Langley", "Choosin' Texas", 30_000_000)] + \
+           [_rec(f"D{i}", "x", 500_000) for i in range(9)]
+    sink = CollectingSink()
+    async def discover():
+        return [_market(0.30, q="Will \"Choosin' Texas - Ella Langley\" be the Hot 100 #1 song?")]
+    eng = MusicIntelEngine([_Src(recs)], discover, alert_sink=sink)
+    res = await eng.run_once("hot100", as_of=D)
+    assert len(res.signals) == 1 and res.signals[0].side == "YES"
+    assert "Ella Langley" in res.signals[0].target

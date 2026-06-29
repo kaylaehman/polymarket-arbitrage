@@ -21,6 +21,7 @@ from music_intel.config import MusicIntelConfig
 from music_intel.edge import compute_edge
 from music_intel.projection import project_number_one
 from music_intel.sources.base import ChartRecord
+from music_intel.sources.markets import parse_market_target
 
 logger = logging.getLogger(__name__)
 
@@ -136,11 +137,16 @@ class MusicIntelEngine:
 
         signals: list[ChartSignal] = []
         for m in markets:
-            tgt = _match_target(m.question, records)
-            if tgt is None and records:
-                tgt = records[0]  # fall back to the field leader
-            t_artist = tgt.artist if tgt else ""
-            t_title = tgt.title if tgt else ""
+            # Prefer the SPECIFIC track the market names ("Title - Artist"); these
+            # markets resolve on one track, not the artist's best-charting song.
+            t_artist, t_title = parse_market_target(m.question)
+            if not (t_artist or t_title):
+                # Artist-level question (no quoted track) -> legacy artist match.
+                tgt = _match_target(m.question, records)
+                if tgt is None and records:
+                    tgt = records[0]  # fall back to the field leader
+                t_artist = tgt.artist if tgt else ""
+                t_title = tgt.title if tgt else ""
             proj = project_number_one(
                 records, t_artist, t_title,
                 stream_eu=self._cfg.stream_eu, margin_k=self._cfg.margin_k, as_of=as_of,
