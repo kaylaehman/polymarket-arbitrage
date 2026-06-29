@@ -1,11 +1,15 @@
 """Annual top-Spotify-artist projection model (EXPLAINABLE HEURISTIC, not ground truth).
 
 Projects P(artist = #1 for the full year) from each contender's current daily streaming
-rate and 2026 release activity. All functions are pure (no I/O, no network). Coefficients
-are module constants documented below — override them by passing `sharpness` or adjusting
-the constants directly for tuning experiments.
+rate. Release activity is modelled as UNCERTAINTY (wider probability band), NOT as a rate
+multiplier — the current daily_rate already reflects any recent album activity.
+
+All functions are pure (no I/O, no network). Coefficients are module constants documented
+below — override them by passing `sharpness` or adjusting the constants directly for
+tuning experiments.
 
 Confidence propagation: a tight race -> LOW confidence -> WIDE probability band.
+Release volatility: a recent/active releaser has an even wider band on top of that.
 Downstream edge logic widens its threshold when confidence is low.
 """
 from __future__ import annotations
@@ -17,10 +21,10 @@ from typing import Optional
 # ---------------------------------------------------------------------------
 # Coefficients (APPROXIMATE, tunable — NOT derived from any proprietary data)
 # ---------------------------------------------------------------------------
-ALBUM_BOOST: float = 0.08     # multiplicative lift per 2026 album release
-RECENCY_BOOST: float = 0.10   # additional lift when latest release is within RECENCY_DAYS
-RECENCY_DAYS: int = 120       # threshold for recency boost
-FACTOR_CAP: float = 1.6       # maximum release_factor value
+RECENCY_DAYS: int = 120       # threshold for recency volatility bump
+RECENCY_VOL: float = 0.5      # extra volatility when latest release is within RECENCY_DAYS
+VOL_PER_ALBUM: float = 0.1    # per-2026-album volatility increment
+VOL_CAP: float = 2.0          # maximum release_volatility value
 SHARPNESS: float = 6.0        # softmax temperature: higher = winner-takes-more
 
 
@@ -36,33 +40,38 @@ class ArtistProjection:
     drivers: list            # [(name, value), ...]
 
 
-def release_factor(albums: int, days_since_latest: Optional[float]) -> float:
-    """Compute the release-activity multiplier for projected streams.
+def release_volatility(albums: int, days_since_latest: Optional[float]) -> float:
+    """How uncertain an artist's forward streaming is.
+
+    A recent/active releaser has a less predictable trajectory (fresh albums spike
+    then decay), so its projection deserves a WIDER band. >= 1.0; never boosts the
+    point estimate.
 
     Args:
         albums: Number of albums released in 2026.
         days_since_latest: Days since the most recent release, or None if no release.
 
     Returns:
-        Multiplier in [1.0, FACTOR_CAP].
+        Volatility multiplier in [1.0, VOL_CAP].
     """
-    factor = 1.0 + ALBUM_BOOST * albums
+    v = 1.0
     if days_since_latest is not None and days_since_latest <= RECENCY_DAYS:
-        factor += RECENCY_BOOST
-    return min(factor, FACTOR_CAP)
+        v += RECENCY_VOL
+    v += VOL_PER_ALBUM * albums
+    return min(v, VOL_CAP)
 
 
-def _build_projection(contender: dict, days_remaining: float, days_elapsed: float) -> tuple[float, float]:
-    """Return (ytd, projected_streams) for one contender dict."""
+def _build_projection(contender: dict, days_remaining: float, days_elapsed: float) -> tuple[float, float, float]:
+    """Return (ytd, projected_streams, volatility) for one contender dict."""
     daily_rate = float(contender["daily_rate"])
     albums = int(contender.get("albums_2026", 0))
     days_since = contender.get("days_since_release", None)
     ytd_override = contender.get("ytd_estimate", None)
 
     ytd = float(ytd_override) if ytd_override is not None else daily_rate * days_elapsed
-    rf = release_factor(albums, days_since)
-    projected = ytd + daily_rate * days_remaining * rf
-    return ytd, projected, rf
+    projected = ytd + daily_rate * days_remaining
+    vol = release_volatility(albums, days_since)
+    return ytd, projected, vol
 
 
 def project_top_artist(
@@ -90,11 +99,11 @@ def project_top_artist(
     if not contenders:
         return []
 
-    # Step 1: build (ytd, projected, rf) for every contender
+    # Step 1: build (ytd, projected, volatility) for every contender
     rows = []
     for c in contenders:
-        ytd, projected, rf = _build_projection(c, days_remaining, days_elapsed)
-        rows.append((c, ytd, projected, rf))
+        ytd, projected, vol = _build_projection(c, days_remaining, days_elapsed)
+        rows.append((c, ytd, projected, vol))
 
     # Step 2: softmax over projected values (guard M==0 -> uniform)
     max_proj = max(r[2] for r in rows)
@@ -106,7 +115,7 @@ def project_top_artist(
     total = sum(raw)
     probs = [r / total for r in raw]
 
-    # Step 3: confidence band — sort by projected descending
+    # Step 3: confidence from top-2 gap ratio
     sorted_proj = sorted((proj for _, _, proj, _ in rows), reverse=True)
     if len(sorted_proj) >= 2 and sorted_proj[0] > 0:
         confidence = max(0.0, min(1.0, (sorted_proj[0] - sorted_proj[1]) / sorted_proj[0]))
@@ -118,15 +127,16 @@ def project_top_artist(
     rank_map = {i: rank + 1 for rank, i in enumerate(proj_order)}
 
     results = []
-    for idx, ((c, ytd, projected, rf), p) in enumerate(zip(rows, probs)):
-        half = (1.0 - confidence) * 0.5 * p
+    for idx, ((c, ytd, projected, vol), p) in enumerate(zip(rows, probs)):
+        # Band widened by BOTH low-confidence AND release volatility; point estimate unchanged
+        half = (1.0 - confidence) * 0.5 * p * vol
         prob_low = max(0.0, p - half)
         prob_high = min(1.0, p + half)
 
         drivers = [
             ("ytd", round(ytd, 4)),
             ("daily_rate", float(c["daily_rate"])),
-            ("release_factor", round(rf, 4)),
+            ("release_volatility", round(vol, 4)),
             ("projected_units", round(projected, 4)),
             ("rank", rank_map[idx]),
         ]
