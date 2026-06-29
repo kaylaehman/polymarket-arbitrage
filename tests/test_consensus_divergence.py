@@ -113,3 +113,36 @@ async def test_scan_macro_nowcast_none_skips():
     macro_cfg = SimpleNamespace(sigma={"CPIYOY": 0.2})
     s = ConsensusDivergenceStrategy(min_divergence=0.10, skip_categories=[], macro_cfg=macro_cfg)
     assert await s.scan([m], {"no_ask": lambda t: 0.50, "macro": _Macro()}) == []
+
+
+@pytest.mark.asyncio
+async def test_scan_per_game_sports_emits_candidate():
+    from types import SimpleNamespace
+    import datetime
+    m = SimpleNamespace(ticker="KXMLBGAME-26JUN29-BALCWS-BAL", title="Baltimore vs Chicago Winner?",
+                        yes_sub_title="Baltimore Orioles", subtitle="", category="Sports", yes_price=0.40,
+                        close_time=datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(days=1),
+                        to_unified_market_id=lambda: "kalshi:KXMLBGAME-26JUN29-BALCWS-BAL")
+    class _Sports:
+        async def championship_probs(self, t): return {}
+        async def game_probs(self, t): return {"Baltimore Orioles": 0.554, "Chicago White Sox": 0.446}
+    s = ConsensusDivergenceStrategy(min_divergence=0.10, skip_categories=[])
+    cands = await s.scan([m], {"no_ask": lambda t: 0.6, "sports": _Sports()})
+    assert len(cands) == 1
+    assert cands[0].side == "YES"   # gate 0.554 vs market 0.40 -> YES +0.154
+    assert cands[0].market_id == "kalshi:KXMLBGAME-26JUN29-BALCWS-BAL"
+
+@pytest.mark.asyncio
+async def test_scan_per_game_no_team_match_skips():
+    from types import SimpleNamespace
+    import datetime
+    m = SimpleNamespace(ticker="KXMLBGAME-26JUN29-BALCWS-BAL", title="t",
+                        yes_sub_title="A's", subtitle="", category="Sports", yes_price=0.40,
+                        close_time=datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(days=1),
+                        to_unified_market_id=lambda: "kalshi:KXMLBGAME-26JUN29-BALCWS-BAL")
+    class _Sports:
+        async def championship_probs(self, t): return {}
+        async def game_probs(self, t): return {"Baltimore Orioles": 0.554, "Chicago White Sox": 0.446}
+    s = ConsensusDivergenceStrategy(min_divergence=0.10, skip_categories=[])
+    # "A's" matches no team -> no candidate
+    assert await s.scan([m], {"no_ask": lambda t: 0.6, "sports": _Sports()}) == []

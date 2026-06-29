@@ -12,7 +12,7 @@ from typing import Any
 from core.directional.models import DirectionalCandidate
 from core.directional.strategies.base import Strategy
 from core.macro_data import parse_macro_ticker
-from core.sports_data import kalshi_series_to_odds, match_team
+from core.sports_data import kalshi_series_to_odds, match_team, kalshi_game_series_to_odds
 
 logger = logging.getLogger(__name__)
 
@@ -50,31 +50,31 @@ class ConsensusDivergenceStrategy(Strategy):
             yes_mid = float(getattr(m, "yes_price", 0) or 0)
             if not (self._min_yes <= yes_mid <= self._max_yes):
                 continue
-            if kalshi_series_to_odds(m.ticker) and sports is not None:
-                try:
-                    probs = await sports.championship_probs(m.ticker)
-                    p_gate = match_team(getattr(m, "yes_sub_title", "") or "", probs)
-                    if p_gate is None:
-                        continue
+            sports_probs = None
+            if sports is not None:
+                if kalshi_series_to_odds(m.ticker):
+                    try:
+                        sports_probs = await sports.championship_probs(m.ticker)
+                    except Exception:
+                        sports_probs = None
+                elif kalshi_game_series_to_odds(m.ticker):
+                    try:
+                        sports_probs = await sports.game_probs(m.ticker)
+                    except Exception:
+                        sports_probs = None
+            if sports_probs:
+                p_gate = match_team(getattr(m, "yes_sub_title", "") or "", sports_probs)
+                if p_gate is not None:
                     res = divergence_side(p_gate, yes_mid, self._min_div)
-                    if res is None:
-                        continue
-                    side, edge = res
-                    market_price = yes_mid if side == "YES" else round(1 - yes_mid, 4)
-                    candidates.append(DirectionalCandidate(
-                        market_id=m.to_unified_market_id(),
-                        title=getattr(m, "title", ""),
-                        category=cat,
-                        side=side,
-                        market_price=market_price,
-                        ai_probability=p_gate,
-                        confidence=None,
-                        edge=edge,
-                        strategy=self.name,
-                        reasoning=f"sports consensus {p_gate:.3f} vs mkt {yes_mid:.3f} -> {side}",
-                    ))
-                except Exception:
-                    continue
+                    if res is not None:
+                        side, edge = res
+                        market_price = yes_mid if side == "YES" else round(1 - yes_mid, 4)
+                        candidates.append(DirectionalCandidate(
+                            market_id=m.to_unified_market_id(), title=getattr(m, "title", ""),
+                            category=cat, side=side, market_price=market_price,
+                            ai_probability=p_gate, confidence=None, edge=edge, strategy=self.name,
+                            reasoning=f"sports consensus {p_gate:.3f} vs mkt {yes_mid:.3f} -> {side}",
+                        ))
             macro_client = ctx.get("macro")
             mm = parse_macro_ticker(m.ticker)
             if mm is not None and macro_client is not None and self._macro_cfg is not None:
