@@ -115,10 +115,14 @@ class DirectionalEngine:
                     max_days_to_resolution=getattr(ml_cfg, "max_days_to_resolution", 90.0),
                     weather_cfg=weather_cfg,
                     financial_cfg=getattr(config, "financial", None),
+                    macro_cfg=getattr(config, "macro", None),
                 ), ml_cfg)
             )
         self._weather_cfg = weather_cfg
         self._financial_cfg = getattr(config, "financial", None)
+        self._macro_cfg = getattr(config, "macro", None)
+        self._macro_client = None  # process-lived MacroNowcastClient (lazy)
+        self._macro_http = None
 
         # PM.US weather source — config gated (default enabled=True)
         pmus_cfg = getattr(config, "pmus_weather", None)
@@ -191,12 +195,27 @@ class DirectionalEngine:
                 http=self._av_http,
             )
 
+    def _ensure_macro_client(self) -> None:
+        """Lazily build the process-lived MacroNowcastClient (Fed nowcasts)."""
+        if self._macro_client is not None:
+            return
+        if self._macro_cfg is None or not self._macro_cfg.enabled:
+            return
+        from core.macro_data import MacroNowcastClient
+        key = os.environ.get(getattr(self._macro_cfg, "fred_api_key_env", "FRED_API_KEY"))
+        self._macro_http = httpx.AsyncClient(timeout=10.0)
+        self._macro_client = MacroNowcastClient(http=self._macro_http, fred_api_key=key)
+
     async def close(self) -> None:
         """FIX C1: Close the process-lived AV HTTP client on engine shutdown."""
         if self._av_http is not None:
             await self._av_http.aclose()
             self._av_http = None
             self._av_client = None
+        if self._macro_http is not None:
+            await self._macro_http.aclose()
+            self._macro_http = None
+            self._macro_client = None
 
     def _build_sc_ctx(self) -> dict:
         """Build SafeCompounder context using scanner's already-fetched books.
@@ -232,6 +251,10 @@ class DirectionalEngine:
         self._ensure_av_client()
         if self._av_client is not None:
             sc_ctx = {**sc_ctx, "av": self._av_client}
+
+        self._ensure_macro_client()
+        if self._macro_client is not None:
+            sc_ctx = {**sc_ctx, "macro": self._macro_client}
 
         # MakerLongshotStrategy needs the full pre-cap liquid universe so that
         # near-term longshots (e.g. KXCABLEAVE-26MAY22-26JUL at index 114) are not

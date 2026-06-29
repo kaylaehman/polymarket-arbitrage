@@ -548,3 +548,28 @@ async def test_run_once_skips_pending_market_same_strategy():
         f"Expected exactly 1 active position for {PENDING_MARKET_ID} (pending dedup); "
         f"got {len(for_market)}: {[(p.status, p.market_id) for p in for_market]}"
     )
+
+
+@pytest.mark.asyncio
+async def test_engine_builds_macro_client_when_enabled(monkeypatch):
+    """With macro.enabled, _ensure_macro_client builds a MacroNowcastClient."""
+    from core.directional.engine import DirectionalEngine
+    cfg = make_config()
+    cfg.macro = SimpleNamespace(enabled=True, fred_api_key_env="FRED_API_KEY",
+                                min_sigma=2.0, require_data=True, horizon_days=45,
+                                sigma={"GDP": 0.4})
+    eng = DirectionalEngine(cfg, FakeKalshiClient(), FakeIntelligenceEngine(), FakeRiskManager())
+    monkeypatch.setenv("FRED_API_KEY", "k")
+    eng._ensure_macro_client()
+    assert eng._macro_client is not None
+    await eng.close()
+
+
+@pytest.mark.asyncio
+async def test_engine_no_macro_client_when_disabled():
+    """No macro config -> no client built (gate inert)."""
+    from core.directional.engine import DirectionalEngine
+    cfg = make_config()  # no macro attribute
+    eng = DirectionalEngine(cfg, FakeKalshiClient(), FakeIntelligenceEngine(), FakeRiskManager())
+    eng._ensure_macro_client()
+    assert eng._macro_client is None
