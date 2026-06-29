@@ -21,3 +21,51 @@ def test_name():
 async def test_scan_no_gate_data_returns_empty():
     s = ConsensusDivergenceStrategy(min_divergence=0.1, skip_categories=[])
     assert await s.scan([], {"no_ask": lambda t: None}) == []
+
+
+@pytest.mark.asyncio
+async def test_scan_sports_emits_candidate_on_divergence():
+    from types import SimpleNamespace
+    import datetime
+    m = SimpleNamespace(ticker="KXNBA-27-WAS",
+                        title="Will the Wizards win the 2027 NBA championship?",
+                        yes_sub_title="Washington Wizards", subtitle="", category="Sports",
+                        yes_price=0.18,
+                        close_time=datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=120),
+                        to_unified_market_id=lambda: "kalshi:KXNBA-27-WAS")
+    class _Sports:
+        async def championship_probs(self, t): return {"Washington Wizards": 0.03}
+    s = ConsensusDivergenceStrategy(min_divergence=0.10, skip_categories=[])
+    cands = await s.scan([m], {"no_ask": lambda t: 0.80, "sports": _Sports()})
+    assert len(cands) == 1
+    assert cands[0].side == "NO"   # gate 0.03 << market 0.18 -> NO underpriced
+    assert cands[0].strategy == "consensus_divergence"
+    assert cands[0].market_id == "kalshi:KXNBA-27-WAS"
+
+
+@pytest.mark.asyncio
+async def test_scan_sports_no_divergence_no_candidate():
+    from types import SimpleNamespace
+    import datetime
+    m = SimpleNamespace(ticker="KXNBA-27-WAS", title="t", yes_sub_title="Washington Wizards",
+                        subtitle="", category="Sports", yes_price=0.18,
+                        close_time=datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(days=120),
+                        to_unified_market_id=lambda: "kalshi:KXNBA-27-WAS")
+    class _Sports:
+        async def championship_probs(self, t): return {"Washington Wizards": 0.16}  # close to 0.18
+    s = ConsensusDivergenceStrategy(min_divergence=0.10, skip_categories=[])
+    assert await s.scan([m], {"no_ask": lambda t: 0.80, "sports": _Sports()}) == []
+
+
+@pytest.mark.asyncio
+async def test_scan_skips_excluded_category():
+    from types import SimpleNamespace
+    import datetime
+    m = SimpleNamespace(ticker="KXNBA-27-WAS", title="t", yes_sub_title="Washington Wizards",
+                        subtitle="", category="Sports", yes_price=0.18,
+                        close_time=datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(days=120),
+                        to_unified_market_id=lambda: "kalshi:KXNBA-27-WAS")
+    class _Sports:
+        async def championship_probs(self, t): return {"Washington Wizards": 0.03}
+    s = ConsensusDivergenceStrategy(min_divergence=0.10, skip_categories=["Sports"])
+    assert await s.scan([m], {"no_ask": lambda t: 0.80, "sports": _Sports()}) == []
