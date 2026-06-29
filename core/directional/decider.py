@@ -131,9 +131,11 @@ class Decider:
                 fraction=self._kelly_frac,
             )
         else:
+            # NO bet: market_price is already the NO entry cost (1 - yes_price),
+            # so the Kelly "price" is market_price itself; the win prob is P(NO).
             frac = kelly_fraction(
                 edge=candidate.edge,
-                yes_price=1.0 - candidate.market_price,
+                yes_price=candidate.market_price,
                 ai_probability=1.0 - candidate.ai_probability,
                 confidence=candidate.confidence,
                 fraction=self._kelly_frac,
