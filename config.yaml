@@ -312,7 +312,17 @@ directional:
       - KXNBAWEST     # NBA Western Conference
       - KXNHLEAST     # NHL Eastern Conference
       - KXNHLWEST     # NHL Western Conference
+      # In-season per-game / series (daily-ish resolution; admitted by consensus_divergence, not longshot)
+      - KXMLBGAME     # MLB per-game money line (84 open within 30d as of 2026-06-29)
+      - KXMLB         # MLB series/division futures
+      - KXWNBA        # WNBA (in season)
+      # Macro extras validated as in-window monthly releases
+      - KXU3          # Unemployment rate
+      - KXPAYROLLS    # Nonfarm payrolls
     max_days_to_resolution: 30  # only include series markets closing within N days
+    # Sports CHAMPIONSHIP futures resolve far out; admit them up to this horizon so
+    # they're scanned when a season is active (NBA/NHL playoffs). Non-futures keep the 30d cap.
+    priority_series_sports_max_days: 220
 
   # ── Weather forecast gate ───────────────────────────────────────────────────
   # Enables NWS forecast gating for KXHIGH* T-type longshot NO bets.
