@@ -361,7 +361,7 @@ directional:
   # Mirrors the weather/financial gates. Default OFF until paper-validated.
   # Needs FRED_API_KEY in .env for GDPNow (free: fredaccount.stlouisfed.org/apikeys).
   macro:
-    enabled: false
+    enabled: true
     min_sigma: 2.0
     require_data: true            # skip (don't bet blind) when nowcast unavailable
     horizon_days: 45
