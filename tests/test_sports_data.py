@@ -169,3 +169,53 @@ async def test_sports_gate_skips_consensus_favorite():
 async def test_sports_gate_skips_no_data_when_require():
     s = _strat()
     assert await s._apply_sports_gate(_fut_market("Washington"), {"sports": _FakeSports({})}) is False
+
+
+# ── per-game h2h mapping ────────────────────────────────────────────────────
+
+def test_kalshi_game_series_mapping():
+    from core.sports_data import kalshi_game_series_to_odds
+    assert kalshi_game_series_to_odds("KXMLBGAME-26JUL02-PITPHI-PIT") == "baseball_mlb"
+    assert kalshi_game_series_to_odds("KXNBAGAME-26-X") == "basketball_nba"
+    assert kalshi_game_series_to_odds("KXMLB-26-X") is None   # futures, not per-game
+    assert kalshi_game_series_to_odds("KXHIGHNY-x") is None
+
+
+def _h2h_resp(events):
+    # events: list of (home, away, home_price, away_price)
+    payload = [{"home_team": h, "away_team": a, "commence_time": "2026-06-29T22:00:00Z",
+                "bookmakers": [{"markets": [{"key": "h2h",
+                    "outcomes": [{"name": h, "price": hp}, {"name": a, "price": ap}]}]}]}
+               for (h, a, hp, ap) in events]
+    from unittest.mock import MagicMock
+    r = MagicMock(); r.json = MagicMock(return_value=payload); r.raise_for_status = MagicMock(); r.headers = {}
+    return r
+
+
+@pytest.mark.asyncio
+async def test_game_probs_devigs_per_event():
+    from unittest.mock import AsyncMock, MagicMock
+    from core.sports_data import SportsOddsClient
+    http = MagicMock()
+    # two games; each event de-vigged independently
+    http.get = AsyncMock(return_value=_h2h_resp([
+        ("Baltimore Orioles", "Chicago White Sox", 1.74, 2.16),
+        ("Pittsburgh Pirates", "Philadelphia Phillies", 2.50, 1.50),
+    ]))
+    c = SportsOddsClient(http=http, api_key="k", cache_ttl_s=9999, max_calls_per_day=10)
+    probs = await c.game_probs("KXMLBGAME-26JUN29-BALCWS-BAL")
+    # Orioles de-vig: (1/1.74)/((1/1.74)+(1/2.16)) ~ 0.554
+    assert probs["Baltimore Orioles"] == pytest.approx((1/1.74)/((1/1.74)+(1/2.16)), abs=1e-3)
+    # each event sums to ~1 independently
+    assert probs["Pittsburgh Pirates"] + probs["Philadelphia Phillies"] == pytest.approx(1.0, abs=1e-6)
+    # cached: second call no new HTTP
+    await c.game_probs("KXMLBGAME-x-y")
+    assert http.get.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_game_probs_unsupported_or_no_key_empty():
+    from unittest.mock import MagicMock
+    from core.sports_data import SportsOddsClient
+    assert await SportsOddsClient(http=MagicMock(), api_key=None).game_probs("KXMLBGAME-x") == {}
+    assert await SportsOddsClient(http=MagicMock(), api_key="k").game_probs("KXHIGHNY-x") == {}

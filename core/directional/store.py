@@ -102,6 +102,8 @@ def category_for_market_id(market_id: str) -> str:
         if "temp" in slug or "high" in slug or "low" in slug:
             return "weather"
         return "other"
+    if market_id.startswith("pm:"):
+        return "music"
     ticker = market_id.split(":", 1)[1] if ":" in market_id else market_id
     ticker = ticker.upper()
     for prefix, category in _CATEGORY_PREFIXES:

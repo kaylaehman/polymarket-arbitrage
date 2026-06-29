@@ -118,7 +118,7 @@ async def discover_polymarket(http: Any, gamma_url: str = _GAMMA_DEFAULT) -> lis
             except (TypeError, ValueError):
                 prices.append(0.0)
         out.append(MarketCandidate(
-            venue="polymarket", market_id=str(m.get("id", "")), question=q,
+            venue="polymarket", market_id=f"pm:{m.get('id', '')}", question=q,
             outcomes=[str(o) for o in _parse_json_list(m.get("outcomes"))],
             prices=prices,
             liquidity=float(m.get("liquidity") or 0.0),
@@ -126,6 +126,40 @@ async def discover_polymarket(http: Any, gamma_url: str = _GAMMA_DEFAULT) -> lis
             resolution_text=m.get("description") or "",
         ))
     return out
+
+
+async def gamma_resolution(http: Any, market_id: str,
+                           gamma_url: str = _GAMMA_DEFAULT) -> Optional[str]:
+    """Resolution of a Polymarket market: "yes" | "no" | None (unresolved/error).
+
+    "yes"/"no" = which named binary outcome won (outcome priced "1"). Never raises.
+    """
+    mid = market_id.split("pm:", 1)[1] if market_id.startswith("pm:") else market_id
+    try:
+        resp = await http.get(f"{gamma_url.rstrip('/')}/markets/{mid}")
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[markets] gamma_resolution %s error: %s", market_id, exc)
+        return None
+    if not data or not data.get("closed"):
+        return None
+    outcomes = [str(o).lower() for o in _parse_json_list(data.get("outcomes"))]
+    prices = _parse_json_list(data.get("outcomePrices"))
+    win_idx = None
+    for i, p in enumerate(prices):
+        try:
+            if float(p) >= 0.99:
+                win_idx = i
+                break
+        except (TypeError, ValueError):
+            continue
+    if win_idx is None or win_idx >= len(outcomes):
+        return None
+    won = outcomes[win_idx]
+    if won in ("yes", "no"):
+        return won
+    return None
 
 
 async def discover_kalshi(kalshi_client: Any) -> list[MarketCandidate]:

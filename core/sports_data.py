@@ -29,6 +29,22 @@ KALSHI_SERIES_TO_ODDS: dict[str, str] = {
 }
 
 
+KALSHI_GAME_SERIES_TO_ODDS: dict[str, str] = {
+    "KXMLBGAME": "baseball_mlb",
+    "KXNBAGAME": "basketball_nba",
+    "KXNHLGAME": "icehockey_nhl",
+}
+
+
+def kalshi_game_series_to_odds(ticker: str) -> Optional[str]:
+    """Map a Kalshi per-game ticker to its Odds API h2h sport key (None if not a
+    supported per-game market). Checks longest prefix first."""
+    for series in sorted(KALSHI_GAME_SERIES_TO_ODDS, key=len, reverse=True):
+        if ticker.startswith(series + "-"):
+            return KALSHI_GAME_SERIES_TO_ODDS[series]
+    return None
+
+
 def kalshi_series_to_odds(ticker: str) -> Optional[str]:
     """Map a Kalshi futures ticker to its Odds API sport key (None if not a
     supported championship-futures market). Checks longest prefix first."""
@@ -137,5 +153,51 @@ class SportsOddsClient:
                     if mkt.get("key") == "outrights":
                         books.append(mkt.get("outcomes", []))
         probs = consensus_probs(books)
+        self._cache[sport] = (now, probs)
+        return probs
+
+    async def game_probs(self, ticker: str) -> dict[str, float]:
+        """Consensus {team: prob} for per-game h2h markets of ``ticker``'s league.
+        De-vigs each event independently and merges into a flat dict. {} if
+        unsupported, no key, cache-miss-but-capped, or any error."""
+        sport = kalshi_game_series_to_odds(ticker)
+        if sport is None or not self._key:
+            return {}
+        now = time.monotonic()
+        hit = self._cache.get(sport)
+        if hit is not None and (now - hit[0]) < self._ttl:
+            return hit[1]
+
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        if today != self._call_date:
+            self._call_date = today
+            self._calls = 0
+        if self._calls >= self._max_calls:
+            logger.warning("[sports] daily Odds-API cap (%d) reached — skipping fetch", self._max_calls)
+            return {}
+
+        try:
+            resp = await self._http.get(
+                f"{_ODDS_BASE}/{sport}/odds/",
+                params={"apiKey": self._key, "regions": "us",
+                        "markets": "h2h", "oddsFormat": "decimal"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[sports] Odds API %s error: %s", sport, exc)
+            return {}
+        finally:
+            self._calls += 1
+
+        probs: dict[str, float] = {}
+        for ev in data or []:
+            event_books = []
+            for bk in ev.get("bookmakers", []):
+                for mkt in bk.get("markets", []):
+                    if mkt.get("key") == "h2h":
+                        event_books.append(mkt.get("outcomes", []))
+            if event_books:
+                probs.update(consensus_probs(event_books))
         self._cache[sport] = (now, probs)
         return probs

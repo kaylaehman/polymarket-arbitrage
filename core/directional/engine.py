@@ -77,6 +77,7 @@ class DirectionalEngine:
             exclude_categories=list(config.category_exclude),
             priority_series=_priority_series,
             priority_series_max_days=_priority_max_days,
+            priority_series_sports_max_days=getattr(scanner_cfg, "priority_series_sports_max_days", 30.0),
         )
 
         # Build strategies
@@ -119,6 +120,43 @@ class DirectionalEngine:
                     sports_cfg=getattr(config, "sports", None),
                 ), ml_cfg)
             )
+        cd_cfg = getattr(config, "consensus_divergence", None)
+        if cd_cfg is not None and getattr(cd_cfg, "enabled", False):
+            from core.directional.strategies.consensus_divergence import ConsensusDivergenceStrategy
+            self._strategies.append(
+                (ConsensusDivergenceStrategy(
+                    min_divergence=cd_cfg.min_divergence,
+                    max_yes_price=cd_cfg.max_yes_price,
+                    min_yes_price=cd_cfg.min_yes_price,
+                    skip_categories=list(getattr(cd_cfg, "skip_categories", [])),
+                    sports_cfg=getattr(config, "sports", None),
+                    macro_cfg=getattr(config, "macro", None),
+                ), cd_cfg)
+            )
+
+        # Music paper strategy — routes music_intel chart-edge signals into the
+        # paper book. Uses a process-lived http client (kworb scrape + Gamma
+        # discovery + Gamma resolution in the tracker). PAPER only.
+        self._music_http = None
+        mp_cfg = getattr(config, "music_paper", None)
+        if mp_cfg is not None and getattr(mp_cfg, "enabled", False):
+            from music_intel.config import MusicIntelConfig
+            from music_intel.engine import MusicIntelEngine
+            from music_intel.sources.kworb import KworbSource
+            from music_intel.sources.markets import discover_polymarket
+            from core.directional.strategies.music_paper import MusicPaperStrategy
+            _mcfg = MusicIntelConfig()
+            self._music_http = httpx.AsyncClient(
+                headers={"User-Agent": _mcfg.user_agent}, timeout=20.0, follow_redirects=True)
+            _msrc = KworbSource(http=self._music_http)
+            _meng = MusicIntelEngine(
+                [_msrc], lambda: discover_polymarket(self._music_http),
+                store=None, alert_sink=None, cfg=_mcfg)
+            self._strategies.append((MusicPaperStrategy(
+                engine=_meng, charts=list(getattr(mp_cfg, "charts", ["spotify_us_daily"])),
+                min_refresh_seconds=getattr(mp_cfg, "min_refresh_seconds", 1800.0),
+            ), mp_cfg))
+
         self._weather_cfg = weather_cfg
         self._financial_cfg = getattr(config, "financial", None)
         self._macro_cfg = getattr(config, "macro", None)
@@ -162,6 +200,7 @@ class DirectionalEngine:
             executor=self.executor,
             risk_manager=risk_manager,
             pmus_client=self._pmus_client,
+            gamma_http=self._music_http,
         )
 
         # Max hold hours for tracker (default 72)
@@ -241,6 +280,9 @@ class DirectionalEngine:
             await self._sports_http.aclose()
             self._sports_http = None
             self._sports_client = None
+        if self._music_http is not None:
+            await self._music_http.aclose()
+            self._music_http = None
 
     def _build_sc_ctx(self) -> dict:
         """Build SafeCompounder context using scanner's already-fetched books.
@@ -325,6 +367,12 @@ class DirectionalEngine:
             elif strategy.name == "safe_compounder":
                 ctx = sc_ctx
                 strategy_markets = markets
+            elif strategy.name == "consensus_divergence":
+                ctx = sc_ctx
+                strategy_markets = maker_markets
+            elif strategy.name == "music_paper":
+                ctx = {}            # runs the music engine itself; ignores Kalshi markets
+                strategy_markets = []
             else:
                 ctx = {}  # AiDirectional needs no extra ctx
                 strategy_markets = markets
