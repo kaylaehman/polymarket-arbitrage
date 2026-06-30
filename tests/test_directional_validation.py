@@ -50,3 +50,36 @@ def test_build_report_from_fake_store():
     assert "maker_longshot" in report and "artist_paper" in report
     # maker_longshot resolved=3 net +0.7 -> ready (>=2, net>0, win_rate .67>=0); appears before failing artist_paper
     assert report.index("maker_longshot") < report.index("artist_paper")
+
+
+# --- M2: stronger gate (min_avg_pnl) + riskless-strategy win-rate exemption ---
+
+def test_promotion_status_failing_when_avg_pnl_below_floor():
+    # Net positive but razor-thin per-trade edge (one lucky trade): should FAIL a min_avg_pnl floor.
+    s = StrategyStat("x", resolved=40, wins=21, win_rate=0.525, net_pnl=0.40, avg_pnl=0.01)
+    assert promotion_status(s, min_resolved=30, min_avg_pnl=0.05) == "failing"
+    # Without the floor it would have read "ready" (net>0, win_rate ok) — confirm the floor is what fails it.
+    assert promotion_status(s, min_resolved=30, min_avg_pnl=0.0) == "ready"
+
+
+def test_promotion_status_ready_when_avg_pnl_above_floor():
+    s = StrategyStat("x", resolved=40, wins=26, win_rate=0.65, net_pnl=4.0, avg_pnl=0.10)
+    assert promotion_status(s, min_resolved=30, min_avg_pnl=0.05, min_win_rate=0.5) == "ready"
+
+
+def test_riskless_strategy_exempt_from_winrate_floor():
+    # An arb-style strategy with a low win rate but solid net/avg PnL: the win-rate
+    # gate should NOT fail it when it's named riskless.
+    s = StrategyStat("multi_outcome", resolved=40, wins=12, win_rate=0.30, net_pnl=3.0, avg_pnl=0.075)
+    assert promotion_status(s, min_resolved=30, min_win_rate=0.5) == "failing"
+    assert promotion_status(
+        s, min_resolved=30, min_win_rate=0.5, riskless_strategies=frozenset({"multi_outcome"})
+    ) == "ready"
+
+
+def test_riskless_strategy_still_needs_positive_pnl():
+    # Exemption is ONLY from the win-rate gate — a losing arb strategy still fails.
+    s = StrategyStat("multi_outcome", resolved=40, wins=8, win_rate=0.2, net_pnl=-2.0, avg_pnl=-0.05)
+    assert promotion_status(
+        s, min_resolved=30, min_win_rate=0.5, riskless_strategies=frozenset({"multi_outcome"})
+    ) == "failing"

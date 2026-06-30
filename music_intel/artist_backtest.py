@@ -7,8 +7,10 @@ Strategy (the "Wayback delta" trick):
   - Jan snapshot: kworb artists.html as close to YYYY-01-01 as Wayback has.
   - As-of snapshot: kworb artists.html as close to YYYY-MM-01 as Wayback has.
   - YTD[artist] = asof_total - jan_total  (both are all-time cumulative totals).
-  - daily_rate = YTD / days_elapsed  (honest average over the year-to-date;
-    we have no historical "Daily" column, so the YTD average rate is the best proxy).
+  - daily_rate = the as-of snapshot's "Daily" column (current rate at that date).
+    This is decay-aware: a faded viral one-hit spike has a LOW current Daily even
+    when its YTD delta is huge, so it no longer fools the projection. Falls back to
+    the YTD average rate only for snapshots predating the Daily column.
   - Project full-year winner via the existing project_top_artist model.
 
 Never raises from public functions — returns None / {} on any data gap or error.
@@ -82,7 +84,7 @@ async def backtest_year(
         }
         or None if either snapshot is missing / unparseable.
     """
-    from music_intel.sources.ytd import _parse_totals
+    from music_intel.sources.ytd import _parse_totals, _parse_daily
     from music_intel.artist_projection import project_top_artist
 
     jan_ts = f"{year}0101"
@@ -107,6 +109,12 @@ async def backtest_year(
         logger.info("[backtest] Empty parse for %d — skipping", year)
         return None
 
+    # Current daily rate at the as-of snapshot (kworb 'Daily' column). This is the
+    # decay-aware forward signal the live model uses: a faded viral spike has a LOW
+    # current Daily even though its YTD delta is large. Falls back to the average
+    # YTD rate per-artist when a snapshot predates the Daily column.
+    asof_daily = _parse_daily(asof_html)
+
     asof_date = date(year, as_of_month, 1)
     jan_date = date(year, 1, 1)
     days_elapsed = max((asof_date - jan_date).days, 1)
@@ -127,7 +135,9 @@ async def backtest_year(
     contenders = [
         {
             "name": a,
-            "daily_rate": ytd[a] / days_elapsed,
+            # Prefer the snapshot's current Daily rate; fall back to avg YTD rate
+            # only if that artist had no Daily value (pre-Daily-column snapshot).
+            "daily_rate": asof_daily.get(a, ytd[a] / days_elapsed),
             "ytd_estimate": ytd[a],
             "albums_2026": 0,
             "days_since_release": None,

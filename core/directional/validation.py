@@ -62,24 +62,50 @@ def promotion_status(
     min_resolved: int = 30,
     min_net_pnl: float = 0.0,
     min_win_rate: float = 0.0,
+    min_avg_pnl: float = 0.0,
+    riskless_strategies: frozenset[str] = frozenset(),
 ) -> str:
     """Determine whether a strategy has earned live consideration.
 
+    Gates (all must pass once the sample is large enough):
+      - net_pnl   > min_net_pnl
+      - avg_pnl  >= min_avg_pnl   (per-trade edge floor — stops one lucky trade from
+                                   reading as "ready" on an otherwise flat strategy)
+      - win_rate >= min_win_rate  (SKIPPED for strategies named in riskless_strategies:
+                                   arb-style strategies win on net edge, not hit-rate)
+
     Returns:
         "accumulating" — resolved < min_resolved (insufficient sample)
-        "failing"      — resolved >= min_resolved AND fails PnL or win-rate gate
-        "ready"        — resolved >= min_resolved AND passes all gates
+        "failing"      — resolved >= min_resolved AND fails any active gate
+        "ready"        — resolved >= min_resolved AND passes all active gates
     """
     if stat.resolved < min_resolved:
         return "accumulating"
-    passes = stat.net_pnl > min_net_pnl and stat.win_rate >= min_win_rate
+    win_rate_ok = stat.strategy in riskless_strategies or stat.win_rate >= min_win_rate
+    passes = (
+        stat.net_pnl > min_net_pnl
+        and stat.avg_pnl >= min_avg_pnl
+        and win_rate_ok
+    )
     return "ready" if passes else "failing"
 
 
 _STATUS_RANK = {"ready": 0, "failing": 1, "accumulating": 2}
 
 
-def build_report(store, *, min_resolved: int = 30) -> str:
+# Strategies judged on net edge rather than hit-rate (arb-style); exempt from the
+# win-rate gate. The directional artist/AI strategies are NOT here on purpose.
+RISKLESS_STRATEGIES: frozenset[str] = frozenset({"multi_outcome", "cross_platform_arb", "bundle_arb"})
+
+
+def build_report(
+    store,
+    *,
+    min_resolved: int = 30,
+    min_avg_pnl: float = 0.0,
+    min_win_rate: float = 0.0,
+    riskless_strategies: frozenset[str] = RISKLESS_STRATEGIES,
+) -> str:
     """Query the store for closed positions and return a human-readable report.
 
     One line per strategy:
@@ -89,6 +115,15 @@ def build_report(store, *, min_resolved: int = 30) -> str:
 
     Never raises — returns a single-line "no data" message on any error.
     """
+    def _status(s: StrategyStat) -> str:
+        return promotion_status(
+            s,
+            min_resolved=min_resolved,
+            min_avg_pnl=min_avg_pnl,
+            min_win_rate=min_win_rate,
+            riskless_strategies=riskless_strategies,
+        )
+
     try:
         rows = store._conn.execute(
             "SELECT strategy, realized_pnl FROM directional_positions WHERE status='closed'"
@@ -103,12 +138,12 @@ def build_report(store, *, min_resolved: int = 30) -> str:
 
     ranked = sorted(
         stats.values(),
-        key=lambda s: (_STATUS_RANK[promotion_status(s, min_resolved=min_resolved)], -s.net_pnl),
+        key=lambda s: (_STATUS_RANK[_status(s)], -s.net_pnl),
     )
 
     lines = []
     for s in ranked:
-        status = promotion_status(s, min_resolved=min_resolved)
+        status = _status(s)
         lines.append(
             f"{s.strategy}: {status} | resolved={s.resolved}"
             f" win_rate={s.win_rate:.2f}"
