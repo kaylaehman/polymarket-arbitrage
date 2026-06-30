@@ -474,5 +474,16 @@ class DirectionalEngine:
                 await self.run_once()
             except Exception as exc:
                 logger.error("[directional] run_once failed (continuing): %s", exc, exc_info=True)
+                # run_once threw before reaching its own tracker.sweep() — settle
+                # independently so position resolution is NEVER blocked by a scan or
+                # strategy error (this is what stranded the 06-29 weather markets).
+                try:
+                    await self.tracker.sweep(
+                        now=datetime.now(timezone.utc),
+                        max_hold_hours=self._max_hold_hours,
+                        order_ttl_minutes=self._order_ttl_minutes,
+                    )
+                except Exception as sx:
+                    logger.error("[directional] fallback sweep failed: %s", sx, exc_info=True)
             if interval > 0:
                 await asyncio.sleep(interval)
