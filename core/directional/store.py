@@ -284,6 +284,43 @@ class DirectionalStore:
             "total_realized_pnl": float(row["total_realized_pnl"]),
         }
 
+    def strategies(self) -> list:
+        """Distinct strategy names across ALL positions (open and closed), sorted.
+
+        Used by the dashboard so a strategy with only closed positions (e.g. an arb
+        strategy that has realized P&L but no open exposure) is still listed.
+        """
+        rows = self._conn.execute(
+            "SELECT DISTINCT strategy FROM directional_positions ORDER BY strategy"
+        ).fetchall()
+        return [row["strategy"] for row in rows]
+
+    def pnl_summary_by_mode(self) -> dict:
+        """Per-mode P&L summary: {mode: {open_count, closed_count, open_exposure,
+        total_realized_pnl}}.
+
+        Lets the dashboard show paper vs actual (live) separately. Only modes that
+        have at least one position appear — an empty store returns {}.
+        """
+        rows = self._conn.execute(
+            """SELECT mode,
+                COUNT(*) FILTER (WHERE status = 'open') AS open_count,
+                COUNT(*) FILTER (WHERE status = 'closed') AS closed_count,
+                COALESCE(SUM(notional) FILTER (WHERE status = 'open'), 0.0) AS open_exposure,
+                COALESCE(SUM(realized_pnl) FILTER (WHERE status = 'closed'), 0.0) AS total_realized_pnl
+               FROM directional_positions
+               GROUP BY mode"""
+        ).fetchall()
+        return {
+            row["mode"]: {
+                "open_count": row["open_count"],
+                "closed_count": row["closed_count"],
+                "open_exposure": float(row["open_exposure"]),
+                "total_realized_pnl": float(row["total_realized_pnl"]),
+            }
+            for row in rows
+        }
+
     def category_breakdown(self) -> dict:
         """Per-category validation breakout (#1).
 

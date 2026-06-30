@@ -55,8 +55,13 @@ class _FakeKalshiMarket:
 
 
 def run(coro):
-    """Run a coroutine synchronously (pytest-asyncio alternative)."""
-    return asyncio.get_event_loop().run_until_complete(coro)
+    """Run a coroutine synchronously (pytest-asyncio alternative).
+
+    Uses asyncio.run() so each call gets a fresh loop — hermetic under the full
+    suite, where get_event_loop() raises once a prior async test has closed the
+    thread's event loop (Python 3.12).
+    """
+    return asyncio.run(coro)
 
 
 # ---------------------------------------------------------------------------

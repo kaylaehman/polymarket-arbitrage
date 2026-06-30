@@ -214,7 +214,10 @@ class TestDryRunFlow:
         self.client = _make_client(dry_run=True)
 
     def _run(self, coro):
-        return asyncio.get_event_loop().run_until_complete(coro)
+        # asyncio.run() creates+closes a fresh loop each call, so this is hermetic
+        # under the full suite (get_event_loop() raises once a prior async test has
+        # closed the thread's loop on Python 3.12).
+        return asyncio.run(coro)
 
     def test_place_order_returns_open_order(self):
         order = self._run(
@@ -344,7 +347,10 @@ class TestListMarketsPagination:
     """
 
     def _run(self, coro):
-        return asyncio.get_event_loop().run_until_complete(coro)
+        # asyncio.run() creates+closes a fresh loop each call, so this is hermetic
+        # under the full suite (get_event_loop() raises once a prior async test has
+        # closed the thread's loop on Python 3.12).
+        return asyncio.run(coro)
 
     def _make_page(self, count: int, offset: int = 0, category: str = "sports") -> dict:
         markets = [
