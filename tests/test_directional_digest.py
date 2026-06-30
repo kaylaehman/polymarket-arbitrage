@@ -39,9 +39,27 @@ def test_digest_text_has_sections():
         promotion_report="maker_longshot: accumulating",
         source_health={"kworb": True, "gamma": True, "spotify": False},
     )
-    assert "Daily paper digest" in txt
+    assert "Daily Paper Digest" in txt
+    assert "**Open positions:**" in txt
     assert "maker_longshot" in txt and "Bad Bunny" in txt
-    assert "kworb" in txt and "spotify" in txt
+    assert "```" in txt                      # fenced code blocks for alignment
+    assert "⏳" in txt                        # accumulating -> hourglass
+    assert "kworb ✅" in txt and "spotify ❌" in txt
+
+
+def test_digest_text_empty_mtm_and_no_report():
+    txt = digest_text(open_count=0, by_strategy={}, mtm_lines=[],
+                      promotion_report="", source_health={"kworb": True})
+    assert "no open polymarket positions" in txt.lower()
+    assert "no resolved positions yet" in txt.lower()
+
+
+def test_digest_text_colors_gains_and_losses():
+    gain = digest_text(open_count=1, by_strategy={"x": 1}, mtm_lines=["pm:1 NO: +3.20"],
+                       promotion_report="", source_health={})
+    loss = digest_text(open_count=1, by_strategy={"x": 1}, mtm_lines=["pm:1 YES: -2.50"],
+                       promotion_report="", source_health={})
+    assert "🟢" in gain and "🔴" in loss
 
 
 def test_digest_text_shows_open_count():
@@ -159,7 +177,7 @@ async def test_gather_and_send_builds_and_sends_without_raising():
         sent["body"] = body
 
     txt = await gather_and_send(store, http, alert=fake_alert)
-    assert "Daily paper digest" in txt
+    assert "Daily Paper Digest" in txt
     # title check is flexible — just confirm it sent
     assert sent and "digest" in sent["title"].lower()
 

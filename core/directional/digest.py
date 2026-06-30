@@ -42,34 +42,50 @@ def digest_text(
     promotion_report: str,
     source_health: Dict[str, bool],
 ) -> str:
-    """Assemble a compact multi-section daily digest text.
+    """Assemble the daily digest as Discord-flavored markdown.
 
-    Pure; no I/O.
+    Pure; no I/O. Discord renders markdown in the message content (the Alerter
+    sends ``{"content": text}``), so this uses bold headers, emojis, fenced
+    code blocks for aligned tables, and 🟢/🔴 P&L cues.
     """
-    lines: List[str] = ["Daily paper digest"]
+    today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+    out: List[str] = [f"📊 **Daily Paper Digest** — {today}"]
 
-    strategy_str = "  ".join(f"{k}={v}" for k, v in by_strategy.items())
-    lines.append(f"Open positions: {open_count}  (by strategy: {strategy_str})")
+    # Open positions
+    strat_str = " · ".join(f"{k} {v}" for k, v in by_strategy.items()) or "none"
+    out.append(f"\n📂 **Open positions:** {open_count}  ·  {strat_str}")
 
-    lines.append("Mark-to-market (Polymarket):")
+    # Mark-to-market (Polymarket) — 🟢/🔴 per line, fenced for alignment, + total
+    out.append("\n💰 **Mark-to-market (Polymarket)**")
     if mtm_lines:
+        block = []
         for ml in mtm_lines:
-            lines.append(f"  {ml}")
+            cue = "🔴" if "-" in ml.split(":")[-1] else "🟢"
+            block.append(f"{cue} {ml}")
         total = _sum_mtm(mtm_lines)
-        lines.append(f"  Total unrealized: {total:+.2f}")
+        tcue = "🟢" if total >= 0 else "🔴"
+        out.append("```\n" + "\n".join(block) + "\n```")
+        out.append(f"{tcue} **Total unrealized:** {total:+.2f}")
     else:
-        lines.append("  (no pm: positions)")
+        out.append("_no open Polymarket positions_")
 
-    lines.append("Strategy validation:")
-    for pr_line in promotion_report.splitlines():
-        lines.append(f"  {pr_line}")
+    # Strategy validation — status emojis + fenced block for column alignment
+    out.append("\n📈 **Strategy validation**")
+    report = (promotion_report or "").strip()
+    if report:
+        report = (report.replace("ready", "✅ ready")
+                        .replace("failing", "❌ failing")
+                        .replace("accumulating", "⏳ accumulating"))
+        out.append("```\n" + report + "\n```")
+    else:
+        out.append("_no resolved positions yet_")
 
-    lines.append("Data sources:")
-    for name, up in source_health.items():
-        status = "up" if up else "down"
-        lines.append(f"  {name}: {status}")
+    # Data sources — single ✅/❌ line
+    if source_health:
+        health = " · ".join(f"{n} {'✅' if up else '❌'}" for n, up in source_health.items())
+        out.append(f"\n🩺 **Data sources:** {health}")
 
-    return "\n".join(lines)
+    return "\n".join(out)
 
 
 def _sum_mtm(mtm_lines: List[str]) -> float:
