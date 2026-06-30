@@ -4,9 +4,11 @@ from unittest.mock import AsyncMock, MagicMock
 from music_intel.artist_backtest import backtest_year, score_backtest, _wayback_html
 
 JAN = "<table><tr><th>Artist</th><th>Streams</th></tr>" \
-      "<tr><td>Taylor Swift</td><td>100000.0</td></tr><tr><td>Drake</td><td>120000.0</td></tr></table>"
+      "<tr><td><a href='/spotify/artist/ts_songs.html'>Taylor Swift</a></td><td>100000.0</td></tr>" \
+      "<tr><td><a href='/spotify/artist/dk_songs.html'>Drake</a></td><td>120000.0</td></tr></table>"
 JUN = "<table><tr><th>Artist</th><th>Streams</th></tr>" \
-      "<tr><td>Taylor Swift</td><td>115000.0</td></tr><tr><td>Drake</td><td>128000.0</td></tr></table>"
+      "<tr><td><a href='/spotify/artist/ts_songs.html'>Taylor Swift</a></td><td>115000.0</td></tr>" \
+      "<tr><td><a href='/spotify/artist/dk_songs.html'>Drake</a></td><td>128000.0</td></tr></table>"
 # Taylor YTD = 15000 (5000 more than Drake's 8000) -> Taylor should be model #1
 
 
