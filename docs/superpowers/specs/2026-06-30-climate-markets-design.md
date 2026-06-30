@@ -189,14 +189,48 @@ settled positions feed the calibration loop (Section 8).
 6. **Calibration report** in `validation`; enable families as their reliability looks
    sane.
 
-## 11. Open questions / risks
+## 11. Discovery findings (Phase 1 — COMPLETE 2026-06-30)
 
-- **Real ticker formats unknown** until Discovery (Phase 1) — biggest unknown; gated
-  first.
+Confirmed against the live Kalshi API. Category = **`Climate and Weather`** (285 series).
+
+**Series tickers per family:**
+- Lowest-temp: `KXLOW<CITY>` and `KXLOWT<CITY>` (two patterns; 28 series) — e.g.
+  `KXLOWNYC`, `KXLOWCHI`, `KXLOWTSEA`, `KXLOWTSFO`.
+- Temp-at-time (hourly): `KXTEMP<CITY>H` — e.g. `KXTEMPNYCH`, `KXTEMPCHIH`,
+  `KXTEMPBOSH`, `KXTEMPDCH`, `KXTEMPMIAH` ("Hourly Directional Temperature").
+- Rain: daily `KXRAIND<CITY>` / `KXRAIND`; monthly `KXRAIN<CITY>M`; location-pick
+  `KXRAINHOLIDAY` ("Where will it rain on holidays?").
+- Monthly temp increase: `KXHMONTHRANGE` ("Monthly Temperature Increase (ºC)").
+- Tornado counts: `KXTORNADO` ("Number of Tornadoes").
+
+**KEY SIMPLIFICATION — strikes are uniform structured fields, not per-series regex.**
+Every market object carries `strike_type` ∈ {`greater`, `less`, `between`},
+`floor_strike`, `cap_strike`. So a single shared helper maps any market to its
+outcome interval; providers only parse the **series prefix + city + date/hour/month**
+from the ticker. Confirmed examples:
+- `KXHIGHNY-26JUL01-T99` → greater, floor=99 ("100° or above"); `-B98.5` → between,
+  floor=98 cap=99.
+- `KXTEMPNYCH-26JUN3017-T94.99` → date `26JUN30` + **hour `17`**, greater, floor=94.99.
+- `KXTORNADO-26JUN-425` → month `26JUN`, **count** market, greater, floor=425.
+- `KXHMONTHRANGE-26JUL-T1.30` → month `26JUL`, °C, greater/less/between.
+
+This means `ParsedClimate` carries `(strike_type, lo, hi)` read straight from the
+market object, and the per-family `probability()` integrates its forecast
+distribution over that interval — uniform across all families.
+
+**Seasonality note:** `KXLOW*` and `KXRAIND*` had **0 open markets** on 2026-06-30
+(summer — no low-temp/daily-rain markets listed). Their providers are still built and
+unit-tested against the known ticker format; they simply have nothing to trade until
+the season lists markets. `KXTEMP*H`, `KXTORNADO`, `KXHMONTHRANGE` are open now.
+
+## 12. Open questions / residual risks
+
 - **Forecast-error σ is a guess** until calibration data accrues — mitigated by
-  starting wide + the reliability report.
-- **Tornado/monthly climatology granularity** (per-state vs per-region rates) depends
-  on what SPC/NOAA expose at a useful resolution — confirm during Phase 5.
-- **"Where will it rain" multi-outcome** markets need per-location normalisation;
-  if Kalshi encodes these differently than expected, that sub-family may slip to a
-  follow-on.
+  starting wide + the reliability report (Section 8).
+- **Tornado/monthly climatology granularity** (SPC national vs regional tornado
+  rates; NOAA normals resolution) — confirm exact source endpoints during the Tier 2
+  plan. `KXTORNADO` is a **national** monthly count (floor ~300–425), so SPC national
+  monthly climatology is the right base rate.
+- **"Where will it rain" multi-outcome** (`KXRAINHOLIDAY`) needs per-location
+  normalisation; if its encoding differs from the daily-rain markets, that sub-family
+  slips to a follow-on rather than blocking Tier 1.
