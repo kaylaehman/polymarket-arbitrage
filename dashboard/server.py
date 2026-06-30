@@ -56,6 +56,10 @@ class DashboardState:
         
         # Directional trading store (set by run_with_dashboard when engine is active)
         self.directional_store: Optional["DirectionalStore"] = None
+        # Price sources for unrealized mark-to-market (set by run_with_dashboard).
+        self.http = None                 # shared httpx.AsyncClient for Gamma
+        self.kalshi_client = None        # KalshiClient for Kalshi current prices
+        self.pmus_client = None          # PolymarketUSClient for PM.US current prices
 
         # WebSocket connections
         self._connections: list[WebSocket] = []
@@ -222,6 +226,188 @@ def build_directional_payload(store) -> dict:
     }
 
 
+async def compute_unrealized_by_mode(open_positions, price_fn) -> dict:
+    """Mark each open position to market and aggregate per mode WITH coverage.
+
+    Args:
+        open_positions: iterable of position objects (market_id, side, entry_price,
+            size, mode).
+        price_fn: async callable(market_id) -> current YES price (0..1) or None.
+
+    Returns {mode: {"unrealized": float, "marked": int, "total": int}}. A position
+    whose price is unavailable or whose fetch raises is counted in ``total`` but not
+    ``marked`` (its P&L is excluded) — so the UI can show partial coverage honestly.
+    Never raises. {} when there are no positions.
+    """
+    from core.directional.digest import position_mtm
+
+    async def _one(p):
+        try:
+            yes = await price_fn(p.market_id)
+            if yes is None:
+                return (p.mode, None)
+            return (p.mode, position_mtm(p.entry_price, p.side, p.size, yes))
+        except Exception:  # a single bad fetch must not break the panel
+            return (p.mode, None)
+
+    results = await asyncio.gather(*[_one(p) for p in open_positions], return_exceptions=True)
+    acc: dict = {}
+    for r in results:
+        if isinstance(r, Exception) or not r:
+            continue
+        mode, pnl = r
+        b = acc.setdefault(mode, {"unrealized": 0.0, "marked": 0, "total": 0})
+        b["total"] += 1
+        if pnl is not None:
+            b["unrealized"] += pnl
+            b["marked"] += 1
+    return {m: {**b, "unrealized": round(b["unrealized"], 4)} for m, b in acc.items()}
+
+
+def _kalshi_settled_realized(settlements) -> tuple:
+    """(realized_pnl_dollars, count) from Kalshi settlement records.
+
+    Settlements are the AUTHORITATIVE realized P&L: each carries ``revenue`` (payout)
+    and a cost basis in cents. Unlike summing raw fills, this correctly accounts for
+    settlement liability on short positions, so it never invents a phantom 'win'.
+    """
+    total = 0.0
+    n = 0
+    for s in settlements:
+        try:
+            revenue = float(s.get("revenue", 0) or 0)
+            cost = float(s.get("yes_total_cost", s.get("cost", 0)) or 0)
+            total += (revenue - cost) / 100.0
+            n += 1
+        except Exception:
+            continue
+    return total, n
+
+
+_actual_cache: dict = {"data": None, "ts": 0.0}
+_mtm_cache: dict = {"by_mode": {}, "ts": 0.0}
+
+
+async def refresh_directional_metrics(state) -> None:
+    """Recompute paper mark-to-market + the real-account 'Actual' bucket into the
+    module caches. Run by a background loop so the /api/directional request path
+    stays fast (slow Kalshi/PM.US reads happen here, off the request). Never raises.
+    """
+    import time as _time
+
+    store = getattr(state, "directional_store", None)
+    if store is None:
+        return
+    try:
+        price_fn = make_price_fn(state.http, state.kalshi_client, state.pmus_client)
+        _mtm_cache["by_mode"] = await compute_unrealized_by_mode(store.open_positions(), price_fn)
+        _mtm_cache["ts"] = _time.monotonic()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("refresh MTM failed: %s", exc)
+    try:
+        await fetch_actual_account(state.kalshi_client)  # populates _actual_cache
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("refresh actual account failed: %s", exc)
+
+
+async def fetch_actual_account(kalshi_client, ttl: float = 30.0):
+    """Real Kalshi account summary for the dashboard's 'Actual' bucket.
+
+    Uses only AUTHORITATIVE sources: the cash ``balance`` and ``settlements`` (booked
+    realized P&L). It deliberately does NOT derive P&L by summing open fills, because
+    short positions carry a settlement liability that fill proceeds don't capture —
+    that would show a phantom win. Open positions are reported with their resting
+    exposure; their P&L stays unrealized until settlement.
+
+    Returns the bucket dict, or None when the account can't be read (e.g. a credless
+    client). Cached for ``ttl`` seconds. Never raises.
+    """
+    import time as _time
+
+    if kalshi_client is None:
+        return None
+    cached = _actual_cache["data"]
+    if cached is not None and (_time.monotonic() - _actual_cache["ts"]) < ttl:
+        return cached
+    try:
+        balance = await kalshi_client.get_balance()
+    except Exception:
+        return None  # unauthenticated / unauthorized -> no actual data to show
+
+    realized = 0.0
+    closed_count = 0
+    open_count = 0
+    exposure = 0.0
+    try:
+        sr = await kalshi_client._signed_request("GET", "/portfolio/settlements", params={"limit": 200})
+        realized, closed_count = _kalshi_settled_realized(sr.get("settlements", []))
+    except Exception:
+        pass
+    try:
+        pr = await kalshi_client._signed_request("GET", "/portfolio/positions", params={"limit": 200})
+        for p in pr.get("market_positions", []) or []:
+            pos = p.get("position", 0) or 0
+            if pos:
+                open_count += 1
+                exposure += abs(float(p.get("market_exposure", 0) or 0)) / 100.0
+    except Exception:
+        pass
+
+    data = {
+        "balance": round(balance, 2),
+        "open_count": open_count,
+        "open_exposure": round(exposure, 2),
+        "closed_count": closed_count,
+        "total_realized_pnl": round(realized, 2),
+        "unrealized_pnl": 0.0,
+        "total_pnl": round(realized, 2),
+        "marked": open_count,
+        "marked_total": open_count,
+        "source": "kalshi_live",
+    }
+    _actual_cache["data"] = data
+    _actual_cache["ts"] = _time.monotonic()
+    return data
+
+
+def make_price_fn(http, kalshi_client, pmus_client=None):
+    """Build an async price_fn(market_id) routing by prefix, with a short per-market
+    cache so the 10s dashboard poll doesn't hammer the upstream APIs.
+
+      pm:<id>       -> Polymarket Gamma current YES price
+      kalshi:<tkr>  -> Kalshi get_market().yes_price (last YES, dollars 0..1)
+      pmus:<slug>   -> Polymarket US current YES price (marketSides; settles to 1/0)
+
+    Returns None when a price can't be fetched. Never raises.
+    """
+    from core.directional.digest import pm_current_yes_price
+    import time as _time
+
+    cache: dict = {}        # market_id -> (price, ts)
+    ttl = 30.0
+
+    async def price_fn(market_id):
+        hit = cache.get(market_id)
+        if hit is not None and (_time.monotonic() - hit[1]) < ttl:
+            return hit[0]
+        price = None
+        try:
+            if market_id.startswith("pmus:") and pmus_client is not None:
+                price = await pmus_client.current_yes_price(market_id.removeprefix("pmus:"))
+            elif market_id.startswith("pm:") and http is not None:
+                price = await pm_current_yes_price(http, market_id)
+            elif market_id.startswith("kalshi:") and kalshi_client is not None:
+                mkt = await kalshi_client.get_market(market_id.removeprefix("kalshi:"))
+                price = getattr(mkt, "yes_price", None) if mkt is not None else None
+        except Exception:
+            price = None
+        if price is not None:
+            cache[market_id] = (price, _time.monotonic())
+        return price
+
+    return price_fn
+
+
 def create_app() -> FastAPI:
     """Create the FastAPI application."""
     app = FastAPI(
@@ -276,7 +462,29 @@ def create_app() -> FastAPI:
     
     @app.get("/api/risk")
     async def get_risk():
-        """Get risk metrics."""
+        """Get risk metrics.
+
+        Driven by the directional paper engine (the legacy arb risk-manager numbers
+        were stale/wrong). Exposure + daily P&L come from the live store; drawdown is
+        reported 0 until an equity curve is tracked.
+        """
+        store = dashboard_state.directional_store
+        if store is not None:
+            try:
+                pnl = store.pnl_summary()
+                exposure = float(pnl.get("open_exposure", 0.0))
+                legacy = dashboard_state.risk or {}
+                return {
+                    "global_exposure": exposure,
+                    "max_global_exposure": float(legacy.get("max_global_exposure", 0) or 0) or max(exposure, 500.0),
+                    "daily_pnl": float(pnl.get("total_realized_pnl", 0.0)),
+                    "daily_pnl_limit": legacy.get("daily_pnl_limit", -500),
+                    "current_drawdown_pct": 0.0,
+                    "max_drawdown_pct": legacy.get("max_drawdown_pct", 15),
+                    "source": "directional",
+                }
+            except Exception as exc:
+                logger.warning("get_risk directional build failed: %s", exc)
         return dashboard_state.risk
     
     @app.get("/api/timing")
@@ -287,7 +495,25 @@ def create_app() -> FastAPI:
     @app.get("/api/directional")
     async def get_directional():
         """Get directional trading status: strategies, open positions, recent signals, P&L."""
-        return build_directional_payload(dashboard_state.directional_store)
+        payload = build_directional_payload(dashboard_state.directional_store)
+        # Merge mark-to-market + the real-account 'Actual' bucket from caches that a
+        # background task keeps warm (refresh_directional_metrics). The request never
+        # does slow upstream I/O, so it can't hang on a slow Kalshi/PM.US call.
+        by_mode = payload.get("pnl", {}).get("by_mode") or {}
+        mtm = _mtm_cache.get("by_mode") or {}
+        for mode, bucket in by_mode.items():
+            cov = mtm.get(mode)
+            if cov:
+                bucket["unrealized_pnl"] = cov["unrealized"]
+                bucket["marked"] = cov["marked"]
+                bucket["marked_total"] = cov["total"]
+                bucket["total_pnl"] = round(
+                    bucket.get("total_realized_pnl", 0.0) + cov["unrealized"], 4
+                )
+        actual = _actual_cache.get("data")
+        if actual is not None:
+            payload.setdefault("pnl", {}).setdefault("by_mode", {})["live"] = actual
+        return payload
 
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket):
@@ -1415,6 +1641,12 @@ def get_embedded_html() -> str:
             background: var(--accent-blue, #3b82f6);
             color: #fff;
         }
+        .pnl-meta {
+            margin-right: 12px;
+            font-size: 11px;
+            color: var(--text-secondary, #aaa);
+            white-space: nowrap;
+        }
     </style>
 </head>
 <body>
@@ -1429,6 +1661,7 @@ def get_embedded_html() -> str:
                 <button type="button" class="pnl-toggle-btn active" data-mode="paper" id="pnlTogglePaper">Paper</button>
                 <button type="button" class="pnl-toggle-btn" data-mode="live" id="pnlToggleLive">Actual</button>
             </div>
+            <span class="pnl-meta" id="pnlMeta"></span>
             <span class="mode-badge" id="modeBadge">DRY RUN</span>
         </div>
     </header>
@@ -1936,17 +2169,32 @@ def get_embedded_html() -> str:
             const byMode = (lastDirectional.pnl || {}).by_mode || {};
             const m = byMode[pnlMode] || {open_count: 0, closed_count: 0, open_exposure: 0, total_realized_pnl: 0};
 
-            // No unrealized mark yet, so "Total" == realized for now (labelled Realized below it).
+            // Total = realized + unrealized mark-to-market on open positions; the
+            // Realized card shows just the closed-position P&L. total_pnl is supplied
+            // by the server when MTM succeeds, else falls back to realized.
             const realized = m.total_realized_pnl || 0;
+            const total = (m.total_pnl !== undefined && m.total_pnl !== null) ? m.total_pnl : realized;
             const exposure = m.open_exposure || 0;
             const tp = document.getElementById('totalPnl');
-            tp.textContent = formatCurrency(realized);
-            tp.className = `metric-value ${realized >= 0 ? 'positive' : 'negative'}`;
+            tp.textContent = formatCurrency(total);
+            tp.className = `metric-value ${total >= 0 ? 'positive' : 'negative'}`;
             const rp = document.getElementById('realizedPnl');
             rp.textContent = formatCurrency(realized);
             rp.className = `metric-value ${realized >= 0 ? 'positive' : 'negative'}`;
             document.getElementById('exposure').textContent = formatCurrency(exposure);
             document.getElementById('openOrders').textContent = m.open_count || 0;
+
+            // Meta line: real cash balance for Actual; mark-to-market coverage for Paper.
+            const meta = document.getElementById('pnlMeta');
+            if (meta) {
+                if (pnlMode === 'live' && m.balance !== undefined && m.balance !== null) {
+                    meta.textContent = 'Balance ' + formatCurrency(m.balance);
+                } else if (m.marked_total && m.marked < m.marked_total) {
+                    meta.textContent = 'MTM ' + m.marked + '/' + m.marked_total + ' marked';
+                } else {
+                    meta.textContent = '';
+                }
+            }
         }
 
         function setPnlMode(mode) {

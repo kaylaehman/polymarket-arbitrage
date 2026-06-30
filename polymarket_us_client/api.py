@@ -189,6 +189,27 @@ class PolymarketUSClient(BasePolymarketClient):
         raw = data.get("market", data)
         return self._parse_market(raw)
 
+    async def current_yes_price(self, slug: str) -> Optional[float]:
+        """Current YES price (0..1) for a market, parsed from ``marketSides``.
+
+        PM.US carries the live price on the YES side (``description == "Yes"`` or
+        ``long is True``); a settled market reports ``1.0``/``0.0``. Returns None if
+        the market or its YES price is unavailable. Never raises — read-only and used
+        on the dashboard's mark-to-market path.
+        """
+        try:
+            raw = await self._fetch_market_raw(slug)
+            if not raw:
+                return None
+            for side in raw.get("marketSides", []) or []:
+                desc = (side.get("description") or "").strip().lower()
+                if desc == "yes" or side.get("long") is True:
+                    pv = side.get("price")
+                    return float(pv) if pv is not None else None
+        except Exception:  # noqa: BLE001
+            return None
+        return None
+
     async def get_market_result(self, slug: str) -> Optional[str]:
         """Return the winning side for a resolved PM.US market, or None if unresolved.
 

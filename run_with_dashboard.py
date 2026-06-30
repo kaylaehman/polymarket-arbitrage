@@ -39,7 +39,7 @@ try:
 except ImportError:
     PolymarketUSClient = None  # type: ignore
 from utils.logging_utils import setup_logging
-from dashboard.server import app, dashboard_state
+from dashboard.server import app, dashboard_state, refresh_directional_metrics
 from dashboard.integration import DashboardIntegration
 
 
@@ -271,6 +271,45 @@ class TradingBotWithDashboard:
                 self._guarded(self.directional_engine.run_forever(), "directional")
             )
             dashboard_state.directional_store = self.directional_engine.store
+            # Price + account sources for the dashboard (read-only). The Kalshi client
+            # is authenticated so the 'Actual' bucket can read the real balance,
+            # positions, and settlements; it is used ONLY for reads (never order
+            # placement). Best-effort — failure just leaves paper-only / realized-only.
+            try:
+                import httpx
+                dashboard_state.http = httpx.AsyncClient(timeout=8.0, follow_redirects=True)
+
+                # dry_run=False is REQUIRED for real reads (get_balance/positions
+                # return simulated 0.0 under dry_run). This client is used ONLY for
+                # read calls in the dashboard (get_market, get_balance, GET portfolio
+                # endpoints) — it never places an order.
+                _dash_kalshi = KalshiClient(
+                    timeout=8,          # short: dashboard reads, not the trading client
+                    max_retries=1,
+                    dry_run=False,
+                    api_key_id=self.config.api.kalshi_api_key_id,
+                    private_key_pem=self.config.api.kalshi_private_key,
+                )
+                await _dash_kalshi.__aenter__()
+                dashboard_state.kalshi_client = _dash_kalshi
+
+                try:
+                    if PolymarketUSClient is not None:
+                        _dash_pmus = PolymarketUSClient()
+                        await _dash_pmus.__aenter__()
+                        dashboard_state.pmus_client = _dash_pmus
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("[Directional] dashboard PM.US price source unavailable: %s", exc)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[Directional] dashboard price/account sources unavailable: %s", exc)
+
+            # Keep the dashboard's MTM + Actual-account caches warm off the request
+            # path, so /api/directional never blocks on a slow Kalshi/PM.US read.
+            async def _metrics_loop():
+                while True:
+                    await refresh_directional_metrics(dashboard_state)
+                    await asyncio.sleep(20)
+            asyncio.create_task(self._guarded(_metrics_loop(), "dashboard-metrics"))
             logger.info("[Directional] Engine launched (paper-gated)")
 
         # Initialize signal database (optional; append-only persistence)
