@@ -117,3 +117,32 @@ def test_compute_rank_edges_skips_small():
     rp = {"X": {2: 0.22}}
     outs = [ArtistOutcome("X","pm:9",0.20)]   # |0.22-0.20|=0.02 < 0.10
     assert compute_rank_edges(rp, outs, rank=2, min_edge=0.10) == []
+
+
+@pytest.mark.asyncio
+async def test_find_artist_event_slug_matches_open_event():
+    from music_intel.artist_markets import find_artist_event_slug
+    from unittest.mock import AsyncMock, MagicMock
+    payload = {"events":[
+        {"title":"#2 Spotify Artist 2026","slug":"2-spotify-artist-2026-20260609","closed":False},
+        {"title":"Some closed thing","slug":"x","closed":True}]}
+    r=MagicMock(); r.json=MagicMock(return_value=payload); r.raise_for_status=MagicMock()
+    http=MagicMock(); http.get=AsyncMock(return_value=r)
+    slug = await find_artist_event_slug(http, "#2 Spotify Artist 2026")
+    assert slug == "2-spotify-artist-2026-20260609"
+
+@pytest.mark.asyncio
+async def test_find_artist_event_slug_none_when_no_open_match():
+    from music_intel.artist_markets import find_artist_event_slug
+    from unittest.mock import AsyncMock, MagicMock
+    payload = {"events":[{"title":"#2 Spotify Artist 2026","slug":"s","closed":True}]}  # closed only
+    r=MagicMock(); r.json=MagicMock(return_value=payload); r.raise_for_status=MagicMock()
+    http=MagicMock(); http.get=AsyncMock(return_value=r)
+    assert await find_artist_event_slug(http, "#2 Spotify Artist 2026") is None
+
+@pytest.mark.asyncio
+async def test_find_artist_event_slug_error_none():
+    from music_intel.artist_markets import find_artist_event_slug
+    from unittest.mock import AsyncMock, MagicMock
+    http=MagicMock(); http.get=AsyncMock(side_effect=RuntimeError("down"))
+    assert await find_artist_event_slug(http, "x") is None

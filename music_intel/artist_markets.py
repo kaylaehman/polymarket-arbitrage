@@ -10,7 +10,7 @@ import logging
 import re
 import unicodedata
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 
 from music_intel.sources.markets import _parse_json_list, _GAMMA_DEFAULT
 
@@ -84,6 +84,50 @@ async def discover_artist_market(
         market_id = f"pm:{market.get('id', '')}"
         out.append(ArtistOutcome(artist=artist, pm_market_id=market_id, yes_price=yes_price))
     return out
+
+
+_GAMMA_SEARCH_URL = "https://gamma-api.polymarket.com/public-search"
+
+
+async def find_artist_event_slug(
+    http: Any,
+    query: str,
+    gamma_url: str = _GAMMA_DEFAULT,
+) -> Optional[str]:
+    """Search Gamma for an open event whose title contains all tokens of `query`.
+
+    Returns the first matching open event's slug, or None. Never raises.
+    """
+    tokens = [t.casefold() for t in query.split()]
+    search_url = f"{gamma_url.rstrip('/')}/public-search"
+    try:
+        resp = await http.get(search_url, params={"q": query, "limit_per_type": 10})
+        resp.raise_for_status()
+        events = resp.json().get("events", [])
+        for event in events:
+            if event.get("closed"):
+                continue
+            title = event.get("title", "").casefold()
+            if all(tok in title for tok in tokens):
+                return event.get("slug")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[artist_markets] search error: %s", exc)
+    return None
+
+
+async def discover_artist_market_by_search(
+    http: Any,
+    query: str,
+    gamma_url: str = _GAMMA_DEFAULT,
+) -> list[ArtistOutcome]:
+    """Search for an open event by query, then fetch its outcomes.
+
+    Returns [] if no matching event is found or on any error. Never raises.
+    """
+    slug = await find_artist_event_slug(http, query, gamma_url)
+    if slug is None:
+        return []
+    return await discover_artist_market(http, slug, gamma_url)
 
 
 async def discover_top_artist_markets(

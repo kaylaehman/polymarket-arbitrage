@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import time
+from typing import Any
 
 try:
     from bs4 import BeautifulSoup
@@ -120,6 +121,45 @@ def _parse_totals(html: str) -> dict[str, float]:
     except Exception as exc:  # noqa: BLE001
         logger.warning("[ytd] Parse error: %s", exc)
         return {}
+
+
+async def streams_since(http: Any, start_yyyymmdd: str) -> dict[str, float]:
+    """{artist: current_total - total_at_start} (millions) for artists in both snapshots.
+
+    current = live kworb artists.html; start = closest Wayback snapshot to start_yyyymmdd.
+    Uses params= for the wayback availability call (raw-slash URL returns empty). {} on any error/gap.
+    """
+    try:
+        resp_now = await http.get(_ARTISTS_URL, headers={"User-Agent": _USER_AGENT})
+        resp_now.raise_for_status()
+        now = _parse_totals(resp_now.text)
+        if not now:
+            return {}
+
+        avail_resp = await http.get(
+            _WAYBACK_AVAIL_URL,
+            params={"url": "kworb.net/spotify/artists.html", "timestamp": start_yyyymmdd},
+        )
+        avail_resp.raise_for_status()
+        closest = avail_resp.json().get("archived_snapshots", {}).get("closest")
+        if not closest or not closest.get("url"):
+            return {}
+
+        snap_resp = await http.get(closest["url"], headers={"User-Agent": _USER_AGENT})
+        snap_resp.raise_for_status()
+        start = _parse_totals(snap_resp.text)
+        if not start:
+            return {}
+
+        return {artist: now[artist] - start[artist] for artist in now if artist in start}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[ytd] streams_since error: %s", exc)
+        return {}
+
+
+async def month_to_date_streams(http: Any, year: int, month: int) -> dict[str, float]:
+    """streams_since(f'{year}{month:02d}01') — month-to-date streams per artist."""
+    return await streams_since(http, f"{year}{month:02d}01")
 
 
 class YtdSource:
