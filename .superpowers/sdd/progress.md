@@ -1,14 +1,26 @@
-# Model Improvement + Deferred Items — SDD progress
-Branch: feature/model-improvement  Base: main (ab5a341)  Executor: inline TDD (ruflo agents unstable), paper-safe.
+# Blind-spot + hermetic-tests + dashboard — SDD progress
+Branch: feature/regional-and-hermetic  Base: main (a58708f)  Executor: inline TDD, paper-safe.
 
-- M1 DONE: backtest_year now uses the as-of snapshot's kworb 'Daily' column as the forward
-  rate (music_intel/sources/ytd.py:_parse_daily + _parse_floats_after; artist_backtest.py wiring),
-  falling back to avg-YTD rate only for pre-Daily snapshots. This matches the LIVE model
-  (kworb_artists.parse_artist_rates already reads Daily col 2) so the backtest now honestly
-  measures live accuracy. 3 new tests + 6 existing backtest tests green.
-  HONEST SWEEP (Daily-rate): 2022 BadBunny 3/3, 2024 Taylor 4/4, 2021 BadBunny 0/3 (Olivia
-  Rodrigo/Kyla — model misses Latin-volume weighting), 2023 no Wayback. => 7/10 hit (0.70),
-  9/10 top-3 (0.90), up from old 0.56/0.67. Model solid on sustained leaders, weak on 2021.
-- M2 DONE: promotion_status gains min_avg_pnl floor (one lucky trade no longer reads "ready")
-  + riskless_strategies win-rate exemption (multi_outcome/cross_platform_arb/bundle_arb judged
-  on net edge, not hit-rate). build_report threads both. 4 new tests green (10 total).
+A (2021 blind spot) — DONE, HONEST NEGATIVE RESULT.
+  Added catalog_maturity_weight (total/daily ≈ catalog age) + maturity_lambda threaded
+  through project_top_artist/backtest. Hypothesis: discount spike-newcomers' forward rate.
+  Validated offline on cached 2021/2022/2024 Wayback snapshots @ lam=0/0.5/0.75/1.0:
+  did NOT fix 2021 (still Olivia/Kyla/Myke Towers; Bad Bunny's YTD delta is genuinely
+  ~1.5B BELOW Olivia at the snapshot — kworb mid-year global deltas disagree with the
+  eventual Wrapped #1). 2024 stays 4/4. Root cause: data availability (2021 kworb is
+  [Pos,Artist,Total] with NO Daily col; the miss is a YTD gap, not a forward-rate one),
+  not a weightable model flaw. => maturity_lambda DEFAULT 0 (off), kept as opt-in knob.
+  Also hardened daily fallback: asof_daily.get(a) OR avg-rate (handles 0/absent).
+
+B (full-suite failures) — DONE. 28 failures were NOT network: 27 = asyncio.get_event_loop()
+  pollution (fixed -> asyncio.run() in test_polymarket_us _run x2 + test_cross_platform_matcher run);
+  1 = test_catalyst time-bomb (catalyst sort used wall-clock datetime.now, calendar dates
+  2026-06-21 now in the past). Fixed: scanner gains injectable _now_dt_fn; test pins it to NOW.
+  Final full suite: 1051 passed, 0 failed.
+
+C (dashboard) — DONE (data layer; needs container rebuild to show).
+  C1 exposure card: top cards read legacy dead arb `portfolio` -> repointed to directional
+     per-mode data via renderTopCards().
+  C2 paper/actual toggle: store.pnl_summary_by_mode() (TDD, 3 tests) + header Paper/Actual
+     toggle; top cards switch bucket. Also fixed strategies list (was recent-50-signals ->
+     store.strategies() over all positions; multi_outcome no longer dropped).

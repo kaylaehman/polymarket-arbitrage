@@ -187,8 +187,19 @@ def build_directional_payload(store) -> dict:
     ]
     signals = store.recent_signals(limit=50)
     pnl = store.pnl_summary()
-    # Derive strategy names from signals (unique set, ordered)
-    strategy_names = sorted({s["strategy"] for s in signals}) if signals else []
+    # Per-mode split (paper vs actual/live) for the top cards + toggle.
+    try:
+        pnl["by_mode"] = store.pnl_summary_by_mode()
+    except Exception:
+        pnl["by_mode"] = {}
+    # Distinct strategies across ALL positions (open + closed), unioned with any
+    # recent-signal strategies — so a strategy with only closed positions and
+    # realized P&L (e.g. multi_outcome) is not silently dropped.
+    try:
+        strat_set = set(store.strategies())
+    except Exception:
+        strat_set = {p["strategy"] for p in positions}
+    strategy_names = sorted(strat_set | {s["strategy"] for s in signals})
 
     # Per-category validation breakout (#1): win-rate + EV + sample per category
     # so the longshot-NO edge can be judged per category, not in one aggregate.
@@ -1380,6 +1391,30 @@ def get_embedded_html() -> str:
                 grid-column: span 2;
             }
         }
+
+        /* Paper vs Actual P&L toggle */
+        .pnl-toggle {
+            display: inline-flex;
+            border: 1px solid var(--border, #2a2a3a);
+            border-radius: 8px;
+            overflow: hidden;
+            margin-right: 12px;
+        }
+        .pnl-toggle-btn {
+            background: transparent;
+            color: var(--text-secondary, #aaa);
+            border: none;
+            padding: 5px 14px;
+            font-size: 12px;
+            font-weight: 600;
+            letter-spacing: 0.03em;
+            cursor: pointer;
+            transition: background 0.15s, color 0.15s;
+        }
+        .pnl-toggle-btn.active {
+            background: var(--accent-blue, #3b82f6);
+            color: #fff;
+        }
     </style>
 </head>
 <body>
@@ -1389,6 +1424,10 @@ def get_embedded_html() -> str:
             <div class="status-indicator">
                 <span class="status-dot" id="statusDot"></span>
                 <span id="statusText">Connecting...</span>
+            </div>
+            <div class="pnl-toggle" id="pnlToggle" role="group" aria-label="P&amp;L source">
+                <button type="button" class="pnl-toggle-btn active" data-mode="paper" id="pnlTogglePaper">Paper</button>
+                <button type="button" class="pnl-toggle-btn" data-mode="live" id="pnlToggleLive">Actual</button>
             </div>
             <span class="mode-badge" id="modeBadge">DRY RUN</span>
         </div>
@@ -1866,24 +1905,59 @@ def get_embedded_html() -> str:
             const portfolio = state.portfolio || {};
             const pnl = portfolio.pnl || {};
             const stats = state.stats || {};
-            
-            const totalPnl = pnl.total_pnl || 0;
-            const realizedPnl = pnl.realized_pnl || 0;
-            const exposure = portfolio.total_exposure || 0;
+
             const winRate = (portfolio.win_rate || 0) * 100;
-            
-            document.getElementById('totalPnl').textContent = formatCurrency(totalPnl);
-            document.getElementById('totalPnl').className = `metric-value ${totalPnl >= 0 ? 'positive' : 'negative'}`;
-            
-            document.getElementById('realizedPnl').textContent = formatCurrency(realizedPnl);
-            document.getElementById('realizedPnl').className = `metric-value ${realizedPnl >= 0 ? 'positive' : 'negative'}`;
-            
-            document.getElementById('exposure').textContent = formatCurrency(exposure);
-            document.getElementById('openOrders').textContent = (state.orders || []).length;
             document.getElementById('opportunityCount').textContent = (state.opportunities || []).length;
             document.getElementById('winRate').textContent = `${winRate.toFixed(1)}%`;
             document.getElementById('winRate').className = `metric-value ${winRate >= 50 ? 'positive' : winRate > 0 ? 'neutral' : 'negative'}`;
+
+            // The top P&L/Exposure cards are owned by the directional paper engine
+            // (renderTopCards). Only fall back to the legacy arb portfolio if the
+            // directional payload hasn't arrived yet.
+            if (!lastDirectional) {
+                const totalPnl = pnl.total_pnl || 0;
+                const realizedPnl = pnl.realized_pnl || 0;
+                const exposure = portfolio.total_exposure || 0;
+                document.getElementById('totalPnl').textContent = formatCurrency(totalPnl);
+                document.getElementById('totalPnl').className = `metric-value ${totalPnl >= 0 ? 'positive' : 'negative'}`;
+                document.getElementById('realizedPnl').textContent = formatCurrency(realizedPnl);
+                document.getElementById('realizedPnl').className = `metric-value ${realizedPnl >= 0 ? 'positive' : 'negative'}`;
+                document.getElementById('exposure').textContent = formatCurrency(exposure);
+                document.getElementById('openOrders').textContent = (state.orders || []).length;
+            }
         }
+
+        // ---- Paper vs Actual P&L toggle: top cards reflect the directional engine ----
+        let pnlMode = 'paper';
+        let lastDirectional = null;
+
+        function renderTopCards() {
+            if (!lastDirectional) return;
+            const byMode = (lastDirectional.pnl || {}).by_mode || {};
+            const m = byMode[pnlMode] || {open_count: 0, closed_count: 0, open_exposure: 0, total_realized_pnl: 0};
+
+            // No unrealized mark yet, so "Total" == realized for now (labelled Realized below it).
+            const realized = m.total_realized_pnl || 0;
+            const exposure = m.open_exposure || 0;
+            const tp = document.getElementById('totalPnl');
+            tp.textContent = formatCurrency(realized);
+            tp.className = `metric-value ${realized >= 0 ? 'positive' : 'negative'}`;
+            const rp = document.getElementById('realizedPnl');
+            rp.textContent = formatCurrency(realized);
+            rp.className = `metric-value ${realized >= 0 ? 'positive' : 'negative'}`;
+            document.getElementById('exposure').textContent = formatCurrency(exposure);
+            document.getElementById('openOrders').textContent = m.open_count || 0;
+        }
+
+        function setPnlMode(mode) {
+            pnlMode = mode;
+            document.querySelectorAll('.pnl-toggle-btn').forEach(b =>
+                b.classList.toggle('active', b.dataset.mode === mode));
+            renderTopCards();
+        }
+
+        document.querySelectorAll('.pnl-toggle-btn').forEach(b =>
+            b.addEventListener('click', () => setPnlMode(b.dataset.mode)));
         
         function updateOpportunities() {
             const list = document.getElementById('opportunityList');
@@ -2600,6 +2674,8 @@ def get_embedded_html() -> str:
 
         function updateDirectionalPanel(data) {
             if (!data) return;
+            lastDirectional = data;
+            renderTopCards();
             const positions = data.positions || [];
             const pnl = data.pnl || {};
             const el = document.getElementById('directionalPositionCount');

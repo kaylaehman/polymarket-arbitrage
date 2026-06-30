@@ -59,6 +59,7 @@ async def backtest_year(
     year: int,
     as_of_month: int = 6,
     top_n: int = 10,
+    maturity_lambda: float = 0.0,
 ) -> Optional[dict]:
     """Replay the projection model against historical Wayback snapshots.
 
@@ -136,16 +137,21 @@ async def backtest_year(
         {
             "name": a,
             # Prefer the snapshot's current Daily rate; fall back to avg YTD rate
-            # only if that artist had no Daily value (pre-Daily-column snapshot).
-            "daily_rate": asof_daily.get(a, ytd[a] / days_elapsed),
+            # when absent OR zero (old kworb snapshots, e.g. 2021, are
+            # [Pos, Artist, Total Streams] with no Daily column at all).
+            "daily_rate": asof_daily.get(a) or (ytd[a] / days_elapsed),
             "ytd_estimate": ytd[a],
+            # All-time total at the as-of snapshot — drives catalog-maturity weighting.
+            "catalog_total": asof[a],
             "albums_2026": 0,
             "days_since_release": None,
         }
         for a in top_artists
     ]
 
-    projections = project_top_artist(contenders, days_remaining, days_elapsed)
+    projections = project_top_artist(
+        contenders, days_remaining, days_elapsed, maturity_lambda=maturity_lambda
+    )
     if not projections:
         return None
 
@@ -166,6 +172,7 @@ async def backtest_sweep(
     year_winners: dict,
     months: list = (4, 6, 8, 10),
     top_n: int = 10,
+    maturity_lambda: float = 0.0,
 ) -> list:
     """Run backtest_year for every (year, month) combination and score results.
 
@@ -183,7 +190,9 @@ async def backtest_sweep(
     points: list[dict] = []
     for year, actual_winner in year_winners.items():
         for month in months:
-            result = await backtest_year(http, year, as_of_month=month, top_n=top_n)
+            result = await backtest_year(
+                http, year, as_of_month=month, top_n=top_n, maturity_lambda=maturity_lambda
+            )
             if result is None:
                 continue
             scored = score_backtest(result, actual_winner)

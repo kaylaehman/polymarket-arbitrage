@@ -254,8 +254,12 @@ async def test_scanner_prioritizes_catalyst_near_markets():
         min_volume=0,
         exclude_categories=[],
         _now_fn=_now,
+        # Pin the catalyst wall-clock to NOW so the fixed 2026-06-2x calendar stays
+        # within the 72h window regardless of the real date (was a time-bomb that
+        # only passed when authored).
+        _now_dt_fn=lambda: NOW,
     )
-    # Inject the catalyst config — use dates that are within 72h of NOW (2026-06-20)
+    # Inject the catalyst config — calendar dates are within 72h of the pinned NOW
     scanner._catalyst_calendar = CALENDAR
     scanner._catalyst_window_hours = 72.0
     scanner._catalyst_enabled = True

@@ -199,6 +199,7 @@ class KalshiMarketScanner:
         priority_series: Optional[List[str]] = None,
         priority_series_max_days: float = 30.0,
         priority_series_sports_max_days: float = 30.0,
+        _now_dt_fn: Optional[Callable[[], "datetime"]] = None,
     ) -> None:
         self._client = kalshi_client
         self._categorize = categorize_fn
@@ -206,6 +207,12 @@ class KalshiMarketScanner:
         self._exclude = set(exclude_categories)
         self._cache_ttl = cache_ttl_seconds
         self._now = _now_fn if _now_fn is not None else time.monotonic
+        # Wall-clock used for catalyst-proximity (needs a real datetime, unlike the
+        # monotonic _now used for cache TTL). Injectable so the catalyst sort is
+        # testable without depending on the actual date.
+        self._now_dt = _now_dt_fn if _now_dt_fn is not None else (
+            lambda: datetime.now(timezone.utc)
+        )
         self._max_spread = max_spread
         self._probe_limit = probe_limit
         self._near_term_days = near_term_days
@@ -526,9 +533,8 @@ class KalshiMarketScanner:
         # 8. Optional catalyst stable-sort: bring higher-proximity markets first.
         # Uses Python's stable sort so equal-proximity markets retain spread order.
         if self._catalyst_enabled and self._catalyst_calendar:
-            from datetime import datetime, timezone
             from core.catalyst import catalyst_proximity
-            now_dt = datetime.now(timezone.utc)
+            now_dt = self._now_dt()
 
             def _neg_proximity(m: KalshiMarket) -> float:
                 return -catalyst_proximity(

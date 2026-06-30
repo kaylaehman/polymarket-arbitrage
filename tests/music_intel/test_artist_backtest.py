@@ -82,7 +82,7 @@ def test_summarize_sweep_empty():
 @pytest.mark.asyncio
 async def test_backtest_sweep_collects_points(monkeypatch):
     import music_intel.artist_backtest as bt
-    async def fake_year(http, year, as_of_month=6, top_n=10):
+    async def fake_year(http, year, as_of_month=6, top_n=10, maturity_lambda=0.0):
         if year == 2099: return None   # simulate a data gap
         return {"year":year,"as_of":f"{year}-{as_of_month:02d}","model_top":"Taylor Swift",
                 "ranking":[("Taylor Swift",0.8),("Drake",0.2)],"ytd_leader":"Taylor Swift"}
