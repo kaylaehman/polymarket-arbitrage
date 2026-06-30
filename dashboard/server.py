@@ -2169,32 +2169,49 @@ def get_embedded_html() -> str:
             const byMode = (lastDirectional.pnl || {}).by_mode || {};
             const m = byMode[pnlMode] || {open_count: 0, closed_count: 0, open_exposure: 0, total_realized_pnl: 0};
 
-            // Total = realized + unrealized mark-to-market on open positions; the
-            // Realized card shows just the closed-position P&L. total_pnl is supplied
-            // by the server when MTM succeeds, else falls back to realized.
+            const tp = document.getElementById('totalPnl');
+            const rp = document.getElementById('realizedPnl');
+            const ex = document.getElementById('exposure');
+            const oo = document.getElementById('openOrders');
+            const lbl = el => el.previousElementSibling;   // the .metric-label div
+            const meta = document.getElementById('pnlMeta');
+
+            if (pnlMode === 'live') {
+                // Actual = the real Kalshi account. Headline is the cash balance;
+                // P&L only books on settlement. Relabel cards so it's unmistakable.
+                const balance = (m.balance !== undefined && m.balance !== null) ? m.balance : null;
+                const realized = m.total_realized_pnl || 0;
+                lbl(tp).textContent = 'Account Balance';
+                tp.textContent = balance === null ? '—' : formatCurrency(balance);
+                tp.className = 'metric-value neutral';
+                lbl(rp).textContent = 'Settled P&L';
+                rp.textContent = formatCurrency(realized);
+                rp.className = `metric-value ${realized >= 0 ? 'positive' : 'negative'}`;
+                lbl(ex).textContent = 'Open Exposure';
+                ex.textContent = formatCurrency(m.open_exposure || 0);
+                lbl(oo).textContent = 'Open Positions';
+                oo.textContent = m.open_count || 0;
+                if (meta) meta.textContent = balance === null
+                    ? 'Live account unavailable'
+                    : 'Live Kalshi account' + ((m.open_count || 0) === 0 ? ' · no open positions' : '');
+                return;
+            }
+
+            // Paper mode: Total = realized + unrealized MTM; Realized = closed-only.
             const realized = m.total_realized_pnl || 0;
             const total = (m.total_pnl !== undefined && m.total_pnl !== null) ? m.total_pnl : realized;
-            const exposure = m.open_exposure || 0;
-            const tp = document.getElementById('totalPnl');
+            lbl(tp).textContent = 'Total PnL';
             tp.textContent = formatCurrency(total);
             tp.className = `metric-value ${total >= 0 ? 'positive' : 'negative'}`;
-            const rp = document.getElementById('realizedPnl');
+            lbl(rp).textContent = 'Realized PnL';
             rp.textContent = formatCurrency(realized);
             rp.className = `metric-value ${realized >= 0 ? 'positive' : 'negative'}`;
-            document.getElementById('exposure').textContent = formatCurrency(exposure);
-            document.getElementById('openOrders').textContent = m.open_count || 0;
-
-            // Meta line: real cash balance for Actual; mark-to-market coverage for Paper.
-            const meta = document.getElementById('pnlMeta');
-            if (meta) {
-                if (pnlMode === 'live' && m.balance !== undefined && m.balance !== null) {
-                    meta.textContent = 'Balance ' + formatCurrency(m.balance);
-                } else if (m.marked_total && m.marked < m.marked_total) {
-                    meta.textContent = 'MTM ' + m.marked + '/' + m.marked_total + ' marked';
-                } else {
-                    meta.textContent = '';
-                }
-            }
+            lbl(ex).textContent = 'Exposure';
+            ex.textContent = formatCurrency(m.open_exposure || 0);
+            lbl(oo).textContent = 'Open Orders';
+            oo.textContent = m.open_count || 0;
+            if (meta) meta.textContent = (m.marked_total && m.marked < m.marked_total)
+                ? 'MTM ' + m.marked + '/' + m.marked_total + ' marked' : '';
         }
 
         function setPnlMode(mode) {
