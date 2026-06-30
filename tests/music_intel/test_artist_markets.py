@@ -100,3 +100,20 @@ async def test_discover_artist_market_by_slug():
     assert len(outs)==1 and outs[0].pm_market_id=="pm:7"
     # the slug was passed through to the gamma query
     assert any("top-spotify-artist-in-june" in str(c.kwargs.get("params","")) or "top-spotify-artist-in-june" in str(c.args) for c in http.get.call_args_list)
+
+
+def test_compute_rank_edges_for_number_two():
+    from music_intel.artist_markets import compute_rank_edges, ArtistOutcome
+    rank_probs = {"Drake": {1:0.30, 2:0.45, 3:0.15}, "Bad Bunny": {1:0.55, 2:0.20}}
+    outs = [ArtistOutcome("Drake","pm:1",0.20), ArtistOutcome("Bad Bunny","pm:2",0.25)]
+    edges = compute_rank_edges(rank_probs, outs, rank=2, min_edge=0.10)
+    drake = [e for e in edges if e.artist=="Drake"]
+    assert drake and drake[0].side=="YES"            # model P(#2)=0.45 >> market 0.20
+    assert drake[0].model_prob == pytest.approx(0.45)
+
+
+def test_compute_rank_edges_skips_small():
+    from music_intel.artist_markets import compute_rank_edges, ArtistOutcome
+    rp = {"X": {2: 0.22}}
+    outs = [ArtistOutcome("X","pm:9",0.20)]   # |0.22-0.20|=0.02 < 0.10
+    assert compute_rank_edges(rp, outs, rank=2, min_edge=0.10) == []

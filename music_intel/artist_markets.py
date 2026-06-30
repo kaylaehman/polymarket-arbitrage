@@ -150,3 +150,56 @@ def compute_artist_edges(
 
     edges.sort(key=lambda e: abs(e.edge), reverse=True)
     return edges
+
+
+def compute_rank_edges(
+    rank_probs: dict,
+    outcomes: list[ArtistOutcome],
+    rank: int,
+    *,
+    min_edge: float = 0.10,
+) -> list[ArtistEdge]:
+    """Edges for a '#<rank> Spotify Artist' market using Monte-Carlo rank probabilities.
+
+    For each outcome, looks up the artist's P(rank=k) from rank_probs. Emits an
+    ArtistEdge when abs(model_prob - yes_price) >= min_edge. Name matching uses
+    _normalize for accent/case tolerance.
+
+    Args:
+        rank_probs: {artist_name: {rank:int -> prob:float}} from rank_probabilities().
+        outcomes: ArtistOutcome list from discover_artist_market().
+        rank: The rank to evaluate (1-based, e.g. 2 for '#2 Spotify Artist').
+        min_edge: Minimum absolute edge to emit a signal.
+
+    Returns:
+        List of ArtistEdge sorted by abs(edge) descending.
+    """
+    # Build normalized lookup: normalized_name -> (canonical_name, rank_dict)
+    norm_probs: dict[str, tuple[str, dict[int, float]]] = {
+        _normalize(name): (name, rank_dict)
+        for name, rank_dict in rank_probs.items()
+    }
+
+    edges: list[ArtistEdge] = []
+    for outcome in outcomes:
+        entry = norm_probs.get(_normalize(outcome.artist))
+        p = entry[1].get(rank, 0.0) if entry is not None else 0.0
+        yes_price = outcome.yes_price
+        raw_edge = p - yes_price
+        if abs(raw_edge) < min_edge:
+            continue
+        side = "YES" if raw_edge > 0 else "NO"
+        edges.append(ArtistEdge(
+            artist=outcome.artist,
+            pm_market_id=outcome.pm_market_id,
+            side=side,
+            model_prob=p,
+            prob_low=p,
+            prob_high=p,
+            market_price=yes_price,
+            edge=raw_edge,
+            confidence=0.0,
+        ))
+
+    edges.sort(key=lambda e: abs(e.edge), reverse=True)
+    return edges
