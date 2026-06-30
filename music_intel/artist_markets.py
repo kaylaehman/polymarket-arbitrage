@@ -10,7 +10,7 @@ import logging
 import re
 import unicodedata
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 
 from music_intel.sources.markets import _parse_json_list, _GAMMA_DEFAULT
 
@@ -86,6 +86,50 @@ async def discover_artist_market(
     return out
 
 
+_GAMMA_SEARCH_URL = "https://gamma-api.polymarket.com/public-search"
+
+
+async def find_artist_event_slug(
+    http: Any,
+    query: str,
+    gamma_url: str = _GAMMA_DEFAULT,
+) -> Optional[str]:
+    """Search Gamma for an open event whose title contains all tokens of `query`.
+
+    Returns the first matching open event's slug, or None. Never raises.
+    """
+    tokens = [t.casefold() for t in query.split()]
+    search_url = f"{gamma_url.rstrip('/')}/public-search"
+    try:
+        resp = await http.get(search_url, params={"q": query, "limit_per_type": 10})
+        resp.raise_for_status()
+        events = resp.json().get("events", [])
+        for event in events:
+            if event.get("closed"):
+                continue
+            title = event.get("title", "").casefold()
+            if all(tok in title for tok in tokens):
+                return event.get("slug")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[artist_markets] search error: %s", exc)
+    return None
+
+
+async def discover_artist_market_by_search(
+    http: Any,
+    query: str,
+    gamma_url: str = _GAMMA_DEFAULT,
+) -> list[ArtistOutcome]:
+    """Search for an open event by query, then fetch its outcomes.
+
+    Returns [] if no matching event is found or on any error. Never raises.
+    """
+    slug = await find_artist_event_slug(http, query, gamma_url)
+    if slug is None:
+        return []
+    return await discover_artist_market(http, slug, gamma_url)
+
+
 async def discover_top_artist_markets(
     http: Any,
     year: str = "2026",
@@ -146,6 +190,59 @@ def compute_artist_edges(
             market_price=price,
             edge=raw_edge,
             confidence=getattr(proj, "confidence", 0.0),
+        ))
+
+    edges.sort(key=lambda e: abs(e.edge), reverse=True)
+    return edges
+
+
+def compute_rank_edges(
+    rank_probs: dict,
+    outcomes: list[ArtistOutcome],
+    rank: int,
+    *,
+    min_edge: float = 0.10,
+) -> list[ArtistEdge]:
+    """Edges for a '#<rank> Spotify Artist' market using Monte-Carlo rank probabilities.
+
+    For each outcome, looks up the artist's P(rank=k) from rank_probs. Emits an
+    ArtistEdge when abs(model_prob - yes_price) >= min_edge. Name matching uses
+    _normalize for accent/case tolerance.
+
+    Args:
+        rank_probs: {artist_name: {rank:int -> prob:float}} from rank_probabilities().
+        outcomes: ArtistOutcome list from discover_artist_market().
+        rank: The rank to evaluate (1-based, e.g. 2 for '#2 Spotify Artist').
+        min_edge: Minimum absolute edge to emit a signal.
+
+    Returns:
+        List of ArtistEdge sorted by abs(edge) descending.
+    """
+    # Build normalized lookup: normalized_name -> (canonical_name, rank_dict)
+    norm_probs: dict[str, tuple[str, dict[int, float]]] = {
+        _normalize(name): (name, rank_dict)
+        for name, rank_dict in rank_probs.items()
+    }
+
+    edges: list[ArtistEdge] = []
+    for outcome in outcomes:
+        entry = norm_probs.get(_normalize(outcome.artist))
+        p = entry[1].get(rank, 0.0) if entry is not None else 0.0
+        yes_price = outcome.yes_price
+        raw_edge = p - yes_price
+        if abs(raw_edge) < min_edge:
+            continue
+        side = "YES" if raw_edge > 0 else "NO"
+        edges.append(ArtistEdge(
+            artist=outcome.artist,
+            pm_market_id=outcome.pm_market_id,
+            side=side,
+            model_prob=p,
+            prob_low=p,
+            prob_high=p,
+            market_price=yes_price,
+            edge=raw_edge,
+            confidence=0.0,
         ))
 
     edges.sort(key=lambda e: abs(e.edge), reverse=True)

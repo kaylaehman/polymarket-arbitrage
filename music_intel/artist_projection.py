@@ -15,6 +15,7 @@ Downstream edge logic widens its threshold when confidence is low.
 from __future__ import annotations
 
 import math
+import random
 from dataclasses import dataclass
 from typing import Optional
 
@@ -152,3 +153,65 @@ def project_top_artist(
 
     results.sort(key=lambda r: r.prob, reverse=True)
     return results
+
+
+def rank_probabilities(
+    contenders: list,
+    days_remaining: float,
+    days_elapsed: float,
+    *,
+    n_sims: int = 4000,
+    seed: int = 12345,
+) -> dict:
+    """Monte-Carlo P(rank=k) per artist.
+
+    Returns {name: {rank:int -> prob:float}} (rank 1-based).
+    Only the FUTURE part of the projection is uncertain (YTD is known).
+
+    Args:
+        contenders: Same dict format as project_top_artist.
+        days_remaining: Days left in the year.
+        days_elapsed: Days elapsed in the year.
+        n_sims: Number of Monte-Carlo simulations.
+        seed: RNG seed for determinism.
+
+    Returns:
+        Dict mapping artist name to {rank -> probability} where ranks are 1-based.
+        Empty dict if contenders is empty.
+    """
+    if not contenders:
+        return {}
+
+    # Pre-compute (mean, std) per contender
+    params: list[tuple[str, float, float]] = []
+    for c in contenders:
+        daily_rate = float(c["daily_rate"])
+        albums = int(c.get("albums_2026", 0))
+        days_since = c.get("days_since_release", None)
+        ytd_override = c.get("ytd_estimate", None)
+
+        ytd = float(ytd_override) if ytd_override is not None else daily_rate * days_elapsed
+        future = daily_rate * days_remaining
+        mean = ytd + future
+        vol = release_volatility(albums, days_since)
+        std = future * 0.25 * vol
+        params.append((c["name"], mean, std))
+
+    # Tally rank counts across simulations
+    counts: dict[str, dict[int, int]] = {name: {} for name, _, _ in params}
+    rng = random.Random(seed)
+    n = len(params)
+
+    for _ in range(n_sims):
+        samples = [max(0.0, rng.gauss(mean, std)) for _, mean, std in params]
+        # argsort descending: highest sample -> rank 1
+        order = sorted(range(n), key=lambda i: samples[i], reverse=True)
+        for rank_idx, artist_idx in enumerate(order):
+            rank = rank_idx + 1
+            name = params[artist_idx][0]
+            counts[name][rank] = counts[name].get(rank, 0) + 1
+
+    return {
+        name: {rank: cnt / n_sims for rank, cnt in rank_counts.items()}
+        for name, rank_counts in counts.items()
+    }

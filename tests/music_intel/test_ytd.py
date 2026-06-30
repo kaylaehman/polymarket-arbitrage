@@ -109,3 +109,67 @@ def test_baked_baseline_file_loads():
     from music_intel.sources.ytd import _load_baseline
     b = _load_baseline()
     assert b.get("Bad Bunny", 0) > 100000 and b.get("Drake", 0) > 100000
+
+
+# --- Multi-format parser tests ---
+
+NEW_FMT = (
+    '<table><tr><th>Artist</th><th>Streams</th><th>Daily</th></tr>'
+    '<tr><td><a href="/spotify/artist/abc_songs.html">Drake</a></td><td>136,656.5</td><td>57.6</td></tr>'
+    '<tr><td><a href="/spotify/artist/def_songs.html">Bad Bunny</a></td><td>124,940.7</td><td>51.2</td></tr></table>'
+)
+OLD_FMT = (
+    '<table><tr><th>#</th><th>Artist</th><th>Streams</th><th>Daily</th></tr>'
+    '<tr><td>1</td><td><div><a href="/web/20230101/https://kworb.net/spotify/artist/abc_songs.html">Drake</a></div></td><td>120,000.0</td><td>50.0</td></tr>'
+    '<tr><td>2</td><td><div><a href="/web/20230101/https://kworb.net/spotify/artist/def_songs.html">Bad Bunny</a></div></td><td>90,000.0</td><td>40.0</td></tr></table>'
+)
+
+
+def test_parse_totals_new_format_artist_first():
+    t = _parse_totals(NEW_FMT)
+    assert t["Drake"] == pytest.approx(136656.5) and t["Bad Bunny"] == pytest.approx(124940.7)
+
+
+def test_parse_totals_old_format_with_rank_column():
+    t = _parse_totals(OLD_FMT)               # leading rank column -> artist shifted right
+    assert t["Drake"] == pytest.approx(120000.0) and t["Bad Bunny"] == pytest.approx(90000.0)
+    assert "1" not in t and "2" not in t     # ranks are NOT treated as artists
+
+
+def test_parse_totals_row_without_artist_link_skipped():
+    bad = '<table><tr><td>1</td><td>no link here</td><td>5.0</td></tr></table>'
+    assert _parse_totals(bad) == {}
+
+
+@pytest.mark.asyncio
+async def test_streams_since_now_minus_snapshot():
+    from music_intel.sources.ytd import streams_since
+    from unittest.mock import AsyncMock, MagicMock
+    NOWH = ('<table><tr><th>Artist</th><th>Streams</th></tr>'
+            '<tr><td><a href="/spotify/artist/a_songs.html">Drake</a></td><td>136,000.0</td></tr></table>')
+    SNAP = ('<table><tr><th>Artist</th><th>Streams</th></tr>'
+            '<tr><td><a href="/spotify/artist/a_songs.html">Drake</a></td><td>134,000.0</td></tr></table>')
+    http=MagicMock()
+    async def _get(url,*a,**k):
+        r=MagicMock(); r.raise_for_status=MagicMock()
+        if "archive.org/wayback/available" in url:
+            r.json=MagicMock(return_value={"archived_snapshots":{"closest":{"available":True,
+                "url":"http://web.archive.org/web/20260601/https://kworb.net/spotify/artists.html"}}})
+        elif "web.archive.org" in url: r.text=SNAP
+        else: r.text=NOWH
+        return r
+    http.get=AsyncMock(side_effect=_get)
+    out = await streams_since(http, "20260601")
+    assert out["Drake"] == pytest.approx(136000.0 - 134000.0)
+
+@pytest.mark.asyncio
+async def test_streams_since_no_snapshot_empty():
+    from music_intel.sources.ytd import streams_since
+    from unittest.mock import AsyncMock, MagicMock
+    http=MagicMock()
+    async def _get(url,*a,**k):
+        r=MagicMock(); r.raise_for_status=MagicMock(); r.text="<table></table>"
+        r.json=MagicMock(return_value={"archived_snapshots":{}})
+        return r
+    http.get=AsyncMock(side_effect=_get)
+    assert await streams_since(http, "20260601") == {}

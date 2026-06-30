@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import time
+from typing import Any
 
 try:
     from bs4 import BeautifulSoup
@@ -28,9 +29,6 @@ _ARTISTS_URL = "https://kworb.net/spotify/artists.html"
 _WAYBACK_AVAIL_URL = "http://archive.org/wayback/available"
 _WAYBACK_PARAMS = {"url": "kworb.net/spotify/artists.html", "timestamp": "20260101"}
 _USER_AGENT = "music-intel/1.0 (+https://kaylas.systems)"
-
-# Column index 1 = "Streams" (all-time cumulative total in millions).
-_STREAMS_COL = 1
 
 # Static Jan-1-2026 baseline (kworb all-time totals), baked once from the Wayback
 # snapshot so runtime needs only the live current totals — no slow/flaky archive.org
@@ -50,11 +48,50 @@ def _load_baseline() -> dict[str, float]:
         return {}
 
 
+def _is_artist_anchor(href: str | None) -> bool:
+    """True for both the current kworb format (/spotify/artist/<id>_songs.html)
+    and the old relative format (artist/<id>.html or <id>.html inside an artist dir).
+
+    Matches any href containing 'artist/' — covers:
+      - Current: /spotify/artist/3TVXtAsR1Inumwj472S9r4_songs.html
+      - Old/relative: artist/3TVXtAsR1Inumwj472S9r4.html
+      - Wayback-wrapped: /web/20230101/https://kworb.net/spotify/artist/...
+    """
+    return bool(href and "artist/" in href)
+
+
+def _find_artist_cell(cells):
+    """Return (index, artist_name) for the first cell containing an artist anchor.
+
+    Returns (None, None) if no such anchor exists in any cell.
+    """
+    for i, cell in enumerate(cells):
+        anchor = cell.find("a", href=_is_artist_anchor)
+        if anchor is not None:
+            return i, anchor.get_text(strip=True)
+    return None, None
+
+
+def _parse_streams_after(cells, artist_idx: int) -> float | None:
+    """Return the first float-parseable value in cells after artist_idx."""
+    for cell in cells[artist_idx + 1 :]:
+        raw = cell.get_text(strip=True).replace(",", "")
+        try:
+            return float(raw)
+        except ValueError:
+            continue
+    return None
+
+
 def _parse_totals(html: str) -> dict[str, float]:
     """Parse kworb artists HTML into {artist: all_time_total_millions}.
 
+    Layout-agnostic: finds the artist cell by its /spotify/artist/ anchor href,
+    then takes the first float-parseable cell that follows it as the streams total.
+    Handles both the current format (artist=col0) and old snapshots (rank=col0,
+    artist=col1) without hard-coding column indices.
+
     Returns {} on empty input, missing table, or any parse error.
-    Column index 1 ("Streams") is the all-time cumulative total.
     """
     if not html or not _BS4_AVAILABLE:
         return {}
@@ -70,20 +107,59 @@ def _parse_totals(html: str) -> dict[str, float]:
             if row.find("th"):
                 continue
             cells = row.find_all("td")
-            if len(cells) <= _STREAMS_COL:
+            artist_idx, artist = _find_artist_cell(cells)
+            if artist_idx is None or not artist:
+                logger.debug("[ytd] Skipping row with no /spotify/artist/ anchor")
                 continue
-            try:
-                artist = cells[0].get_text(strip=True)
-                raw = cells[_STREAMS_COL].get_text(strip=True).replace(",", "")
-                totals[artist] = float(raw)
-            except (ValueError, AttributeError) as exc:
-                logger.debug("[ytd] Skipping unparseable row: %s", exc)
+            streams = _parse_streams_after(cells, artist_idx)
+            if streams is None:
+                logger.debug("[ytd] Skipping row with no parseable streams value: %s", artist)
                 continue
+            totals[artist] = streams
 
         return totals
     except Exception as exc:  # noqa: BLE001
         logger.warning("[ytd] Parse error: %s", exc)
         return {}
+
+
+async def streams_since(http: Any, start_yyyymmdd: str) -> dict[str, float]:
+    """{artist: current_total - total_at_start} (millions) for artists in both snapshots.
+
+    current = live kworb artists.html; start = closest Wayback snapshot to start_yyyymmdd.
+    Uses params= for the wayback availability call (raw-slash URL returns empty). {} on any error/gap.
+    """
+    try:
+        resp_now = await http.get(_ARTISTS_URL, headers={"User-Agent": _USER_AGENT})
+        resp_now.raise_for_status()
+        now = _parse_totals(resp_now.text)
+        if not now:
+            return {}
+
+        avail_resp = await http.get(
+            _WAYBACK_AVAIL_URL,
+            params={"url": "kworb.net/spotify/artists.html", "timestamp": start_yyyymmdd},
+        )
+        avail_resp.raise_for_status()
+        closest = avail_resp.json().get("archived_snapshots", {}).get("closest")
+        if not closest or not closest.get("url"):
+            return {}
+
+        snap_resp = await http.get(closest["url"], headers={"User-Agent": _USER_AGENT})
+        snap_resp.raise_for_status()
+        start = _parse_totals(snap_resp.text)
+        if not start:
+            return {}
+
+        return {artist: now[artist] - start[artist] for artist in now if artist in start}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[ytd] streams_since error: %s", exc)
+        return {}
+
+
+async def month_to_date_streams(http: Any, year: int, month: int) -> dict[str, float]:
+    """streams_since(f'{year}{month:02d}01') — month-to-date streams per artist."""
+    return await streams_since(http, f"{year}{month:02d}01")
 
 
 class YtdSource:

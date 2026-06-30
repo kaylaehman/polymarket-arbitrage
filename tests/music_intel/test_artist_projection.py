@@ -88,3 +88,29 @@ def test_drivers_present_and_explainable():
     d = dict(res[0].drivers)
     for key in ("ytd", "daily_rate", "release_volatility", "projected_units", "rank"):
         assert key in d
+
+
+def test_rank_probabilities_sum_to_one_per_artist_across_ranks():
+    from music_intel.artist_projection import rank_probabilities
+    cs = [{"name":"A","daily_rate":60,"albums_2026":0,"days_since_release":None,"ytd_estimate":12000},
+          {"name":"B","daily_rate":55,"albums_2026":0,"days_since_release":None,"ytd_estimate":11000},
+          {"name":"C","daily_rate":40,"albums_2026":0,"days_since_release":None,"ytd_estimate":8000}]
+    rp = rank_probabilities(cs, days_remaining=185, days_elapsed=180, n_sims=3000, seed=1)
+    for name in ("A","B","C"):
+        assert sum(rp[name].values()) == pytest.approx(1.0, abs=1e-6)
+    # clear leader A should have the highest P(rank=1)
+    assert rp["A"][1] > rp["B"][1] > rp["C"][1]
+
+
+def test_rank_probabilities_deterministic_with_seed():
+    from music_intel.artist_projection import rank_probabilities
+    cs = [{"name":"A","daily_rate":50,"albums_2026":0,"days_since_release":None,"ytd_estimate":10000},
+          {"name":"B","daily_rate":49,"albums_2026":3,"days_since_release":20,"ytd_estimate":9900}]
+    a = rank_probabilities(cs, 185, 180, n_sims=2000, seed=7)
+    b = rank_probabilities(cs, 185, 180, n_sims=2000, seed=7)
+    assert a == b
+
+
+def test_rank_probabilities_empty():
+    from music_intel.artist_projection import rank_probabilities
+    assert rank_probabilities([], 185, 180) == {}
