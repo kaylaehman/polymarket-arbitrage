@@ -383,6 +383,7 @@ class ConsensusDivergenceCfg:
     min_divergence.  Complements maker_longshot (longshot-NO only). PAPER only.
     """
     enabled: bool = True
+    mode: str = "paper"                 # "paper" | "live" — executor places under this (read in run_once)
     min_divergence: float = 0.12
     max_yes_price: float = 0.95
     min_yes_price: float = 0.05

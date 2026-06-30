@@ -418,29 +418,41 @@ class DirectionalEngine:
                     )
                     continue
 
-                order = self.decider.decide(candidate)
-                if order is None:
-                    self.store.record_signal(candidate, placed=False)
+                # A single bad candidate must not abort the cycle — that would skip
+                # the tracker.sweep() below and leave settled positions open forever
+                # (this is exactly what a missing strat_cfg.mode once did).
+                try:
+                    order = self.decider.decide(candidate)
+                    if order is None:
+                        self.store.record_signal(candidate, placed=False)
+                        continue
+
+                    self.store.record_signal(candidate, placed=True)
+
+                    # Compute stop_loss / take_profit for AI candidates
+                    stop_loss: float | None = None
+                    take_profit: float | None = None
+                    ai_cfg = getattr(self._cfg, "ai_directional", None)
+                    if candidate.ai_probability is not None and ai_cfg is not None:
+                        sl_pct = getattr(ai_cfg, "stop_loss_pct", 0.30)
+                        tp_pct = getattr(ai_cfg, "take_profit_pct", 0.50)
+                        stop_loss = order.price * (1.0 - sl_pct)
+                        take_profit = order.price * (1.0 + tp_pct)
+
+                    # Defensive: default to the SAFE paper mode if a strategy config
+                    # is missing `mode`, rather than raising and skipping the sweep.
+                    mode = getattr(strat_cfg, "mode", "paper")
+                    await self.executor.place(order, mode=mode, stop_loss=stop_loss, take_profit=take_profit)
+                    # Track the newly placed market so subsequent candidates in this
+                    # same cycle don't re-post it (handles multiple candidates for
+                    # the same market within one scan batch).
+                    strategy_held.add(candidate.market_id)
+                except Exception as exc:
+                    logger.warning(
+                        "[%s] placement error for %s (skipping): %s",
+                        strategy.name, candidate.market_id, exc,
+                    )
                     continue
-
-                self.store.record_signal(candidate, placed=True)
-
-                # Compute stop_loss / take_profit for AI candidates
-                stop_loss: float | None = None
-                take_profit: float | None = None
-                ai_cfg = getattr(self._cfg, "ai_directional", None)
-                if candidate.ai_probability is not None and ai_cfg is not None:
-                    sl_pct = getattr(ai_cfg, "stop_loss_pct", 0.30)
-                    tp_pct = getattr(ai_cfg, "take_profit_pct", 0.50)
-                    stop_loss = order.price * (1.0 - sl_pct)
-                    take_profit = order.price * (1.0 + tp_pct)
-
-                mode = strat_cfg.mode
-                await self.executor.place(order, mode=mode, stop_loss=stop_loss, take_profit=take_profit)
-                # Track the newly placed market so subsequent candidates in this
-                # same cycle don't re-post it (handles multiple candidates for
-                # the same market within one scan batch).
-                strategy_held.add(candidate.market_id)
 
         # Close the per-cycle weather HTTP client if we opened one.
         if _http_client is not None:
