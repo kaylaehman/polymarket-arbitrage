@@ -72,15 +72,59 @@ def _find_artist_cell(cells):
     return None, None
 
 
-def _parse_streams_after(cells, artist_idx: int) -> float | None:
-    """Return the first float-parseable value in cells after artist_idx."""
+def _parse_floats_after(cells, artist_idx: int) -> list[float]:
+    """Return all float-parseable values in cells after artist_idx, in order.
+
+    For kworb artists.html the order is [Streams, Daily, As lead, Solo, As feature].
+    """
+    out: list[float] = []
     for cell in cells[artist_idx + 1 :]:
         raw = cell.get_text(strip=True).replace(",", "")
         try:
-            return float(raw)
+            out.append(float(raw))
         except ValueError:
             continue
-    return None
+    return out
+
+
+def _parse_streams_after(cells, artist_idx: int) -> float | None:
+    """Return the first float-parseable value in cells after artist_idx (Streams)."""
+    floats = _parse_floats_after(cells, artist_idx)
+    return floats[0] if floats else None
+
+
+def _parse_daily(html: str) -> dict[str, float]:
+    """Parse kworb artists HTML into {artist: current_daily_rate_millions}.
+
+    The 'Daily' column is the SECOND numeric cell after the artist anchor
+    (Streams is first). This is the artist's CURRENT daily streaming rate at the
+    snapshot's date — the decay-aware forward signal a faded viral spike lacks.
+
+    Returns {} on empty input, missing table, a 2-column (no-Daily) snapshot, or
+    any parse error. Artists without a parseable Daily value are omitted.
+    """
+    if not html or not _BS4_AVAILABLE:
+        return {}
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        table = soup.find("table")
+        if table is None:
+            return {}
+        daily: dict[str, float] = {}
+        for row in table.find_all("tr"):
+            if row.find("th"):
+                continue
+            cells = row.find_all("td")
+            artist_idx, artist = _find_artist_cell(cells)
+            if artist_idx is None or not artist:
+                continue
+            floats = _parse_floats_after(cells, artist_idx)
+            if len(floats) >= 2:  # need both Streams and Daily
+                daily[artist] = floats[1]
+        return daily
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[ytd] _parse_daily error: %s", exc)
+        return {}
 
 
 def _parse_totals(html: str) -> dict[str, float]:

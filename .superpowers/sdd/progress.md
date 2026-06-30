@@ -1,11 +1,14 @@
-# Directional Trading — SDD progress ledger
-Branch: feature/directional-trading
-Base: eff33a1
+# Model Improvement + Deferred Items — SDD progress
+Branch: feature/model-improvement  Base: main (ab5a341)  Executor: inline TDD (ruflo agents unstable), paper-safe.
 
-Task 1-4: complete (commits ca7fe29..1f5b040, 8 tests pass)
-Task 5-7: complete (commits 5fc5d7f..0971731, 14 tests pass, additive verified)
-Task 8-9: complete (commits d4a10a0..dd7060e, 34 tests pass)
-Task 10-11: complete (commits 809b537..aa61c54, 40 tests pass). NOTE: decider edge-fallback when Kelly=0 on NO-inversion — flag for final review.
-Task 12-13: complete (commits a455e46..0cb9f1f, 49 tests pass)
-Task 14-17: complete (commits a2897ca..c4ea408, 62 tests pass, gated+additive verified)
-Final review: 2 Critical + 3 Important + 5 Minor — ALL FIXED (77 tests pass).
+- M1 DONE: backtest_year now uses the as-of snapshot's kworb 'Daily' column as the forward
+  rate (music_intel/sources/ytd.py:_parse_daily + _parse_floats_after; artist_backtest.py wiring),
+  falling back to avg-YTD rate only for pre-Daily snapshots. This matches the LIVE model
+  (kworb_artists.parse_artist_rates already reads Daily col 2) so the backtest now honestly
+  measures live accuracy. 3 new tests + 6 existing backtest tests green.
+  HONEST SWEEP (Daily-rate): 2022 BadBunny 3/3, 2024 Taylor 4/4, 2021 BadBunny 0/3 (Olivia
+  Rodrigo/Kyla — model misses Latin-volume weighting), 2023 no Wayback. => 7/10 hit (0.70),
+  9/10 top-3 (0.90), up from old 0.56/0.67. Model solid on sustained leaders, weak on 2021.
+- M2 DONE: promotion_status gains min_avg_pnl floor (one lucky trade no longer reads "ready")
+  + riskless_strategies win-rate exemption (multi_outcome/cross_platform_arb/bundle_arb judged
+  on net edge, not hit-rate). build_report threads both. 4 new tests green (10 total).
