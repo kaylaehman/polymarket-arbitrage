@@ -325,15 +325,37 @@ class DirectionalStore:
                FROM directional_positions
                GROUP BY mode"""
         ).fetchall()
-        return {
-            row["mode"]: {
+        # Directional win-rate per mode: wins / closed over NON-riskless strategies.
+        # Riskless-arb strategies (multi_outcome, cross_platform_arb, bundle_arb) buy
+        # every leg of an event, so their per-leg "losses" are by design and would
+        # drag a directional win-rate down misleadingly — exclude them.
+        from core.directional.validation import RISKLESS_STRATEGIES
+        placeholders = ",".join("?" for _ in RISKLESS_STRATEGIES) or "''"
+        wr = {
+            r["mode"]: (r["wins"], r["dir_closed"])
+            for r in self._conn.execute(
+                f"""SELECT mode,
+                    COUNT(*) FILTER (WHERE realized_pnl > 0) AS wins,
+                    COUNT(*) AS dir_closed
+                   FROM directional_positions
+                   WHERE status = 'closed' AND strategy NOT IN ({placeholders})
+                   GROUP BY mode""",
+                tuple(RISKLESS_STRATEGIES),
+            ).fetchall()
+        }
+        out = {}
+        for row in rows:
+            wins, dir_closed = wr.get(row["mode"], (0, 0))
+            out[row["mode"]] = {
                 "open_count": row["open_count"],
                 "closed_count": row["closed_count"],
                 "open_exposure": float(row["open_exposure"]),
                 "total_realized_pnl": float(row["total_realized_pnl"]),
+                "wins": wins,
+                "dir_closed": dir_closed,
+                "win_rate": (wins / dir_closed) if dir_closed else None,
             }
-            for row in rows
-        }
+        return out
 
     def category_breakdown(self) -> dict:
         """Per-category validation breakout (#1).

@@ -2139,10 +2139,14 @@ def get_embedded_html() -> str:
             const pnl = portfolio.pnl || {};
             const stats = state.stats || {};
 
-            const winRate = (portfolio.win_rate || 0) * 100;
             document.getElementById('opportunityCount').textContent = (state.opportunities || []).length;
-            document.getElementById('winRate').textContent = `${winRate.toFixed(1)}%`;
-            document.getElementById('winRate').className = `metric-value ${winRate >= 50 ? 'positive' : winRate > 0 ? 'neutral' : 'negative'}`;
+            // Win rate is owned by the directional engine (renderTopCards); only fall
+            // back to the legacy arb portfolio before the directional payload arrives.
+            if (!lastDirectional) {
+                const winRate = (portfolio.win_rate || 0) * 100;
+                document.getElementById('winRate').textContent = `${winRate.toFixed(1)}%`;
+                document.getElementById('winRate').className = `metric-value ${winRate >= 50 ? 'positive' : winRate > 0 ? 'neutral' : 'negative'}`;
+            }
 
             // The top P&L/Exposure cards are owned by the directional paper engine
             // (renderTopCards). Only fall back to the legacy arb portfolio if the
@@ -2175,6 +2179,19 @@ def get_embedded_html() -> str:
             const oo = document.getElementById('openOrders');
             const lbl = el => el.previousElementSibling;   // the .metric-label div
             const meta = document.getElementById('pnlMeta');
+
+            // Win rate = directional (non-arb) wins / closed, from the real book.
+            const wrEl = document.getElementById('winRate');
+            if (wrEl) {
+                if (m.win_rate === null || m.win_rate === undefined) {
+                    wrEl.textContent = '--';
+                    wrEl.className = 'metric-value neutral';
+                } else {
+                    const wr = m.win_rate * 100;
+                    wrEl.textContent = `${wr.toFixed(0)}% (${m.wins}/${m.dir_closed})`;
+                    wrEl.className = `metric-value ${wr >= 50 ? 'positive' : wr > 0 ? 'neutral' : 'negative'}`;
+                }
+            }
 
             if (pnlMode === 'live') {
                 // Actual = the real Kalshi account. Headline is the cash balance;
