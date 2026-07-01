@@ -418,6 +418,19 @@ directional:
     max_contenders: 12
     min_refresh_seconds: 3600
 
+  # Climate-markets strategy (Kalshi "Climate and Weather"). PAPER ONLY — every
+  # candidate is placed with mode: paper regardless of the top-level trading_mode.
+  # Enable one family at a time; widen sigma via calibration if the reliability
+  # report shows overconfidence. high_temp validates against the known-good NWS
+  # daily-high path; hourly_temp (KXTEMP*H) has open markets now.
+  climate:
+    enabled: true
+    mode: "paper"
+    longshot_floor: 0.05
+    min_edge: 0.10
+    high_temp_enabled: true
+    hourly_temp_enabled: true
+
 
 # ── Alerts ────────────────────────────────────────────────────────────────────
 # Push trade/kill-switch/position events to Discord and/or Telegram.
