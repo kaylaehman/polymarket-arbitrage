@@ -39,6 +39,25 @@ def safe_cand():
     )
 
 
+def test_max_payout_cap_bounds_longshot_size():
+    """A deep-longshot YES at a tiny price is capped by max_payout, not sized to
+    notional/price (which would be hundreds of contracts)."""
+    class BigCaps:
+        max_position = 8
+        total_exposure = 100
+        max_open = 100
+        max_payout_per_position = 25.0
+    cand = DirectionalCandidate(
+        market_id="kalshi:KXHIGHPHIL-26JUL01-T95", title="t", category="Climate and Weather",
+        side="YES", market_price=0.02, ai_probability=0.6, confidence=0.7,
+        edge=0.58, strategy="climate_paper",
+    )
+    d = Decider(RM(), ST(), kelly_frac=0.25, max_position_usd=8, cash_balance_fn=lambda: 100, caps=BigCaps())
+    o = d.decide(cand)
+    assert o is not None
+    assert o.size <= 25            # capped, not ~400 (= 8/0.02)
+
+
 def ai_cand(side="YES"):
     """AI candidate where Kelly returns positive on YES side (ai_prob=0.70 > market 0.58)."""
     return DirectionalCandidate(
