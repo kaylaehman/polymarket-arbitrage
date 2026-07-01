@@ -69,14 +69,17 @@ class Decider:
         size = math.floor(notional / price)
         if size < 1:
             return None
-        # Max-payout cap: a position's max payout is size * $1. At a tiny price a
-        # fixed notional buys a huge contract count (e.g. $7 / $0.015 = 454), which
-        # can swing the book's mark-to-market by hundreds of dollars — and such an
-        # extreme divergence is usually model error, not edge. Cap the contract count
-        # so no single bet's payout exceeds max_payout_per_position. Only bites deep
-        # longshots; ordinary bets (size ~5-20) are unaffected.
-        max_payout = getattr(self._caps, "max_payout_per_position", 25.0)
-        if max_payout and max_payout > 0:
+        # Optional max-payout cap (OPT-IN, default off): a position's max payout is
+        # size * $1; at a tiny price a fixed notional buys a huge contract count
+        # ($7 / $0.015 = 454). The real guard against that is the per-strategy price
+        # band (see climate edge.py) which refuses extreme-price bets at the source;
+        # this cap is only a belt-and-suspenders backstop, enabled by setting
+        # caps.max_payout_per_position. Default 0 = disabled (does not clamp normal
+        # sizing — an aggressive default clamped legitimate mid-price bets).
+        max_payout = getattr(self._caps, "max_payout_per_position", 0.0)
+        # isinstance guard: caps may be a MagicMock in tests (getattr returns a Mock,
+        # not the default) — only clamp when a real positive number is configured.
+        if isinstance(max_payout, (int, float)) and max_payout > 0:
             size = min(size, int(max_payout))
             if size < 1:
                 return None
