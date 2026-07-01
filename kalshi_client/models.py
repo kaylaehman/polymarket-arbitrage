@@ -39,7 +39,12 @@ class KalshiMarket:
     
     # Category
     category: str = ""
-    
+
+    # Strike fields (for derivatives markets)
+    strike_type: Optional[str] = None     # "greater" | "less" | "between"
+    floor_strike: Optional[float] = None
+    cap_strike: Optional[float] = None
+
     @property
     def is_active(self) -> bool:
         """Check if market is actively trading."""

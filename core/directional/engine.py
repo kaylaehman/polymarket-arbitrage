@@ -176,6 +176,23 @@ class DirectionalEngine:
                 min_refresh_seconds=getattr(ap_cfg, "min_refresh_seconds", 86400.0),
             ), ap_cfg))
 
+        # Climate paper strategy — Kalshi "Climate and Weather" markets, longshot-NO
+        # / directional edge from calibrated provider forecasts. PAPER only, disabled
+        # by default. Provider imports are deferred inside this block so a disabled
+        # climate config never requires the (not-yet-implemented) provider modules.
+        clim_cfg = getattr(config, "climate", None)
+        if clim_cfg is not None and clim_cfg.enabled:
+            from core.directional.climate.registry import ClimateRegistry
+            from core.directional.climate.providers.high_temp import HighTempProvider
+            from core.directional.climate.providers.hourly_temp import HourlyTempProvider
+            providers = []
+            if clim_cfg.high_temp_enabled:
+                providers.append(HighTempProvider())
+            if clim_cfg.hourly_temp_enabled:
+                providers.append(HourlyTempProvider())
+            from core.directional.strategies.climate_paper import ClimatePaperStrategy
+            self._strategies.append((ClimatePaperStrategy(ClimateRegistry(providers), clim_cfg), clim_cfg))
+
         self._weather_cfg = weather_cfg
         self._financial_cfg = getattr(config, "financial", None)
         self._macro_cfg = getattr(config, "macro", None)
@@ -395,6 +412,9 @@ class DirectionalEngine:
             elif strategy.name == "artist_paper":
                 ctx = {}            # runs its own pipeline; ignores Kalshi markets
                 strategy_markets = []
+            elif strategy.name == "climate_paper":
+                ctx = sc_ctx
+                strategy_markets = maker_markets
             else:
                 ctx = {}  # AiDirectional needs no extra ctx
                 strategy_markets = markets

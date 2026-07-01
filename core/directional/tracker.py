@@ -197,6 +197,30 @@ class Tracker:
         except Exception:
             pass
 
+    def _record_calibration_if_climate(self, pos: DirectionalPosition, result: str) -> None:
+        """Log (predicted p_yes, actual outcome) for climate_paper settlements.
+
+        Reads the most recent placed signal's ``ai_probability`` for this market
+        as the predicted probability. No-op if the strategy isn't climate_paper
+        or no placed signal with a probability exists. Never raises — this must
+        never block or break settlement.
+        """
+        if pos.strategy != "climate_paper":
+            return
+        try:
+            outcome_yes = 1 if result.lower() == "yes" else 0
+            row = self._store._conn.execute(
+                "SELECT ai_probability FROM directional_signals "
+                "WHERE market_id = ? AND placed = 1 ORDER BY id DESC LIMIT 1",
+                (pos.market_id,),
+            ).fetchone()
+            if row is None or row["ai_probability"] is None:
+                return
+            predicted_p = row["ai_probability"]
+            self._store.record_calibration(pos.market_id, pos.strategy, predicted_p, outcome_yes)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("calibration recording failed for %s: %s", pos.market_id, exc)
+
     async def _check_resolution(self, pos: DirectionalPosition) -> bool:
         """Settle position if the underlying market has resolved.
 
@@ -239,6 +263,7 @@ class Tracker:
             realized_pnl=realized_pnl,
             closed_at=datetime.now(timezone.utc).isoformat(),
         )
+        self._record_calibration_if_climate(pos, market.result)
         logger.info(
             "Resolved %s %s side=%s pnl=%.4f (net of fees)",
             pos.market_id,
@@ -293,6 +318,7 @@ class Tracker:
             realized_pnl=realized_pnl,
             closed_at=datetime.now(timezone.utc).isoformat(),
         )
+        self._record_calibration_if_climate(pos, result)
         logger.info(
             "Resolved %s %s side=%s pnl=%.4f (net of fees)",
             pos.market_id,
@@ -326,6 +352,7 @@ class Tracker:
             pos.market_id, status="closed", realized_pnl=realized_pnl,
             closed_at=datetime.now(timezone.utc).isoformat(),
         )
+        self._record_calibration_if_climate(pos, result)
         logger.info(
             "Resolved %s %s side=%s pnl=%.4f (music)",
             pos.market_id, result, pos.side, realized_pnl,
