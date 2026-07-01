@@ -12,7 +12,7 @@ import logging
 import math
 import os
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 # Minimum resolved trades before a category's edge gets a statistical verdict.
@@ -47,6 +47,14 @@ _CATEGORY_PREFIXES: tuple[tuple[str, str], ...] = (
     ("KXMLB", "sports"),
     ("KXNFL", "sports"),
 )
+
+
+def _next_day_iso(day_iso: str) -> str:
+    """Return the calendar day after ``day_iso`` ('YYYY-MM-DD'), for a half-open
+    ``[day, next_day)`` range over ISO-8601 timestamp strings. Any 'YYYY-MM-DD...'
+    value in that window sorts lexicographically below next_day's 'YYYY-MM-DD'."""
+    d = datetime.strptime(day_iso[:10], "%Y-%m-%d").date()
+    return (d + timedelta(days=1)).isoformat()
 
 
 def _verdict(closed_pnls: list) -> dict:
@@ -355,6 +363,55 @@ class DirectionalStore:
                 "dir_closed": dir_closed,
                 "win_rate": (wins / dir_closed) if dir_closed else None,
             }
+        return out
+
+    def daily_pnl_by_mode(self, day_iso: str) -> dict:
+        """Per-mode P&L for positions that RESOLVED (closed) on ``day_iso`` (a
+        ``YYYY-MM-DD`` UTC date) and bets that were PLACED (opened) that day.
+
+        Returns ``{mode: {settled_count, wins, losses, realized_pnl, opened_count}}``.
+        ``closed_at``/``opened_at`` are ISO-8601 UTC strings, so a ``>= day``/
+        ``< day+1`` half-open string range selects the calendar day correctly.
+        A resolved position with NULL ``realized_pnl`` (an unfilled/TTL-cancelled
+        maker order) counts toward neither wins nor losses and contributes $0.
+
+        Only modes with activity that day appear; a quiet day returns ``{}``.
+        """
+        lo = day_iso
+        hi = _next_day_iso(day_iso)
+        out: dict = {}
+        # Settled today, grouped by mode.
+        for r in self._conn.execute(
+            """SELECT mode,
+                COUNT(*) AS settled_count,
+                COUNT(*) FILTER (WHERE realized_pnl > 0) AS wins,
+                COUNT(*) FILTER (WHERE realized_pnl < 0) AS losses,
+                COALESCE(SUM(realized_pnl), 0.0) AS realized_pnl
+               FROM directional_positions
+               WHERE status = 'closed' AND closed_at >= ? AND closed_at < ?
+               GROUP BY mode""",
+            (lo, hi),
+        ).fetchall():
+            out[r["mode"]] = {
+                "settled_count": r["settled_count"],
+                "wins": r["wins"],
+                "losses": r["losses"],
+                "realized_pnl": float(r["realized_pnl"]),
+                "opened_count": 0,
+            }
+        # Bets placed today, grouped by mode (merged into the same buckets).
+        for r in self._conn.execute(
+            """SELECT mode, COUNT(*) AS opened_count
+               FROM directional_positions
+               WHERE opened_at >= ? AND opened_at < ?
+               GROUP BY mode""",
+            (lo, hi),
+        ).fetchall():
+            bucket = out.setdefault(
+                r["mode"],
+                {"settled_count": 0, "wins": 0, "losses": 0, "realized_pnl": 0.0, "opened_count": 0},
+            )
+            bucket["opened_count"] = r["opened_count"]
         return out
 
     def category_breakdown(self) -> dict:

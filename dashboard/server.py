@@ -515,6 +515,35 @@ def create_app() -> FastAPI:
             payload.setdefault("pnl", {}).setdefault("by_mode", {})["live"] = actual
         return payload
 
+    @app.get("/api/report/trade")
+    async def get_trade_report():
+        """Discord-ready lifetime P&L summary for the ClawdBot ``/trade-report``
+        command. Returns ``{"report": "<markdown>"}``; the Discord bridge posts
+        the string verbatim. Read-only; never trades."""
+        from core.directional import pnl_report
+        store = dashboard_state.directional_store
+        if store is None:
+            return {"report": "_Directional store not available._"}
+        try:
+            return {"report": pnl_report.total_report(store)}
+        except Exception as exc:  # never 500 into the bridge
+            logger.warning("trade report build failed: %s", exc)
+            return {"report": f"_Could not build trade report: {exc}_"}
+
+    @app.get("/api/report/daily")
+    async def get_daily_report(day: str | None = None):
+        """Discord-ready single-day P&L summary for the ClawdBot ``/daily-report``
+        command. Optional ``?day=YYYY-MM-DD`` (defaults to today UTC). Read-only."""
+        from core.directional import pnl_report
+        store = dashboard_state.directional_store
+        if store is None:
+            return {"report": "_Directional store not available._"}
+        try:
+            return {"report": pnl_report.daily_report(store, day_iso=day)}
+        except Exception as exc:
+            logger.warning("daily report build failed: %s", exc)
+            return {"report": f"_Could not build daily report: {exc}_"}
+
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket):
         """WebSocket endpoint for real-time updates."""
