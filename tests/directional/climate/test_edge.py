@@ -24,3 +24,22 @@ def test_dedup_same_side():
     # p tiny AND far below price -> longshot-NO and directional-NO agree -> one candidate
     c = make_candidates(_p(), market_price=0.40, signal=ClimateSignal(0.02,0.9,"nws"))
     assert len([x for x in c if x.side == "NO"]) == 1
+
+
+def test_no_candidate_priced_at_no_cost():
+    # REGRESSION: a NO candidate must carry the NO entry cost (1 - yes_price), NOT
+    # the YES price. Downstream (decider sizing, Kelly, executor booking) treats
+    # candidate.market_price as the cost of `side`; the old code left it at the YES
+    # price, so longshot-NO bucket bets oversized ~1/yes_price and booked phantom P&L.
+    c = make_candidates(_p(), market_price=0.12, signal=ClimateSignal(0.02, 0.9, "nws"))
+    no = [x for x in c if x.side == "NO"][0]
+    assert no.market_price == pytest.approx(0.88)    # 1 - 0.12, not 0.12
+    assert no.ai_probability == pytest.approx(0.02)  # ai_probability stays P(YES)
+    assert no.edge >= 0                              # magnitude, never negative
+
+
+def test_yes_candidate_priced_at_yes_cost():
+    # YES entry cost is the YES price itself (unchanged).
+    c = make_candidates(_p(), market_price=0.30, signal=ClimateSignal(0.70, 0.8, "nws"))
+    yes = [x for x in c if x.side == "YES"][0]
+    assert yes.market_price == pytest.approx(0.30)
