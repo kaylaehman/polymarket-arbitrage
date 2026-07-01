@@ -70,6 +70,33 @@ async def test_discord_post_correct_payload():
 
 
 @pytest.mark.asyncio
+async def test_discord_retries_once_on_429():
+    """A 429 is honoured via Retry-After and retried once, not dropped."""
+    alerter = _make_alerter(discord="https://discord.test/webhook")
+
+    resp_429 = MagicMock()
+    resp_429.status_code = 429
+    resp_429.headers = {"Retry-After": "0"}
+    resp_429.raise_for_status = MagicMock()
+    resp_ok = MagicMock()
+    resp_ok.status_code = 200
+    resp_ok.raise_for_status = MagicMock()
+
+    with patch("httpx.AsyncClient") as mock_cls:
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.post = AsyncMock(side_effect=[resp_429, resp_ok])
+        mock_cls.return_value = mock_client
+
+        result = await alerter.send("evt", "T", "B", severity="warn")
+
+    assert mock_client.post.await_count == 2   # retried after the 429
+    resp_ok.raise_for_status.assert_called_once()
+    assert "discord" in result
+
+
+@pytest.mark.asyncio
 async def test_telegram_post_correct_params():
     """Alerter sends the correct POST to the Telegram sendMessage endpoint."""
     alerter = _make_alerter(tg_token="BOTTOKEN", tg_chat="CHAT123")

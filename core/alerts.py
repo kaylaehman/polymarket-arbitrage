@@ -15,6 +15,7 @@ min_severity gate.
 from __future__ import annotations
 
 import logging
+import asyncio
 import time
 from typing import Callable, Optional
 
@@ -91,6 +92,12 @@ class Alerter:
         self._now = now_fn
         # dedup store: (event_type, dedup_key) -> last send monotonic ts
         self._last_sent: dict[tuple[str, str], float] = {}
+        # Discord webhook rate-limit protection: serialize sends and space them
+        # so a burst (batch settlement, a multi-leg place cycle) doesn't trip
+        # Discord's per-webhook 429 and silently drop alerts.
+        self._discord_lock = asyncio.Lock()
+        self._discord_min_interval = 1.1   # seconds between Discord sends
+        self._discord_last_send = 0.0      # monotonic ts of last Discord POST
 
     async def send(
         self,
@@ -153,11 +160,31 @@ class Alerter:
         return attempted
 
     async def _send_discord(self, text: str) -> None:
-        """POST to Discord webhook; swallows all exceptions."""
+        """POST to Discord webhook, rate-limit safe; swallows all exceptions.
+
+        Sends are serialized (lock) and spaced by ``_discord_min_interval`` so a
+        burst can't trip Discord's per-webhook 429. On a 429 we honour the
+        ``Retry-After`` header and retry once, so an alert that hits the limit is
+        delayed rather than dropped.
+        """
         try:
-            async with httpx.AsyncClient(timeout=self._TIMEOUT) as client:
-                resp = await client.post(self._discord, json={"content": text})
-                resp.raise_for_status()
+            async with self._discord_lock:
+                # Space sends to respect the webhook rate limit.
+                gap = time.monotonic() - self._discord_last_send
+                if gap < self._discord_min_interval:
+                    await asyncio.sleep(self._discord_min_interval - gap)
+                async with httpx.AsyncClient(timeout=self._TIMEOUT) as client:
+                    resp = await client.post(self._discord, json={"content": text})
+                    if resp.status_code == 429:
+                        retry_after = 1.0
+                        try:
+                            retry_after = float(resp.headers.get("Retry-After", "1"))
+                        except (TypeError, ValueError):
+                            pass
+                        await asyncio.sleep(min(retry_after, 10.0) + 0.1)
+                        resp = await client.post(self._discord, json={"content": text})
+                    resp.raise_for_status()
+                self._discord_last_send = time.monotonic()
         except Exception as exc:
             logger.warning("[alerts] Discord send failed: %s", exc)
 
