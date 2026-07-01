@@ -427,9 +427,13 @@ class Tracker:
 
         - FILLED / PARTIALLY_FILLED (full) → mark status="open" (hold to resolution).
         - Age > order_ttl_minutes and still unfilled → cancel_order + mark closed.
-        - No order_id → skip (paper pending positions should not reach this path).
+        - No order_id and mode="paper" → model the fill against the real orderbook
+          via ``_check_paper_maker_fill`` (see below); never touches live order APIs.
+        - No order_id and mode!="paper" → skip.
         """
         if pos.order_id is None:
+            if getattr(pos, "mode", None) == "paper":
+                await self._check_paper_maker_fill(pos, now, order_ttl_minutes)
             return
 
         try:
@@ -466,4 +470,45 @@ class Tracker:
                 status="closed",
                 realized_pnl=0.0,
                 closed_at=now.isoformat(),
+            )
+
+    async def _check_paper_maker_fill(
+        self,
+        pos: DirectionalPosition,
+        now: datetime,
+        order_ttl_minutes: float,
+    ) -> None:
+        """Model a resting paper NO-buy against the real Kalshi orderbook.
+
+        Fills iff the real NO ask reached <= post_price (pos.entry_price);
+        otherwise the resting order is cancelled "unfilled" at TTL — this is
+        NOT a trade, so it must be excluded from closed-position P&L/win-rate
+        (those query status='closed'). Never raises into the sweep: if the
+        orderbook fetch fails, leave the position pending and retry next cycle.
+        """
+        ticker = pos.market_id.split(":", 1)[-1]
+        no_ask = None
+        try:
+            ob = await self._client.get_orderbook_unified(ticker)
+            no_ask = getattr(getattr(ob, "no", None), "best_ask", None) if ob else None
+        except Exception as exc:
+            logger.debug("paper-fill orderbook fetch failed for %s: %s", ticker, exc)
+            return  # leave pending, retry next cycle
+
+        if no_ask is not None and no_ask <= pos.entry_price:
+            self._store.update_position(pos.market_id, status="open")
+            logger.info(
+                "[paper-fill] %s filled (no_ask %.2f <= post %.2f)",
+                pos.market_id, no_ask, pos.entry_price,
+            )
+            return
+
+        # TTL: never filled -> not a trade
+        now_naive = now.replace(tzinfo=None) if now.tzinfo else now
+        op = pos.opened_at.replace(tzinfo=None) if pos.opened_at.tzinfo else pos.opened_at
+        if (now_naive - op).total_seconds() / 60.0 > order_ttl_minutes:
+            self._store.update_position(pos.market_id, status="unfilled", closed_at=now.isoformat())
+            logger.info(
+                "[paper-fill] %s unfilled at TTL (no_ask never <= post %.2f)",
+                pos.market_id, pos.entry_price,
             )
