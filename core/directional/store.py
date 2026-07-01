@@ -146,6 +146,12 @@ CREATE TABLE IF NOT EXISTS directional_signals (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS climate_calibration (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    market_id TEXT, strategy TEXT, p_yes REAL, outcome_yes INTEGER,
+    recorded_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE INDEX IF NOT EXISTS idx_dirpos_market ON directional_positions(market_id);
 CREATE INDEX IF NOT EXISTS idx_dirpos_status ON directional_positions(status);
 CREATE INDEX IF NOT EXISTS idx_dirsig_market ON directional_signals(market_id);
@@ -219,6 +225,14 @@ class DirectionalStore:
         )
         self._conn.commit()
         return cur.lastrowid
+
+    def record_calibration(self, market_id, strategy, p_yes, outcome_yes) -> None:
+        """Log a predicted-vs-actual outcome pair for later reliability analysis."""
+        self._conn.execute(
+            "INSERT INTO climate_calibration(market_id,strategy,p_yes,outcome_yes) VALUES(?,?,?,?)",
+            (market_id, strategy, float(p_yes), int(outcome_yes)),
+        )
+        self._conn.commit()
 
     def update_position(self, market_id: str, **fields) -> None:
         """Update fields on the most recent position for market_id."""
