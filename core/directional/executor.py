@@ -141,7 +141,7 @@ class Executor:
         Live:  balance-check, place resting NO BUY limit, record PENDING with order_id.
         """
         if mode == "paper":
-            return self._record(order, mode, stop_loss, take_profit, status="open")
+            return self._record(order, mode, stop_loss, take_profit, status="pending")
 
         # Live: pre-flight balance guard
         bal = await self._client.get_balance()
