@@ -264,6 +264,17 @@ SERIES_STATION: dict[str, Station] = {
     "pmus:sfo":  Station("San Francisco Airport, CA",   37.6213, -122.3790),
 }
 
+# Station map for KXTEMP<CITY>H hourly-directional-temperature series.
+# Kept separate from SERIES_STATION since these are hourly (not daily-high)
+# markets and forecast_hour() consults this map specifically.
+HOURLY_SERIES_STATION: dict[str, Station] = {
+    "KXTEMPNYCH": Station("Central Park, NY",                    40.7829, -73.9654),
+    "KXTEMPCHIH": Station("Chicago Midway Airport, IL",          41.7868, -87.7522),
+    "KXTEMPMIAH": Station("Miami International Airport",         25.7959, -80.2870),
+    "KXTEMPBOSH": Station("Boston Logan Airport, MA",            42.3656, -71.0096),
+    "KXTEMPDCH":  Station("Washington Reagan National Airport",  38.8512, -77.0402),
+}
+
 # ---------------------------------------------------------------------------
 # NWS forecast cache (per gridpoint forecast URL; TTL 15 min)
 # ---------------------------------------------------------------------------
@@ -315,6 +326,37 @@ async def _fetch_forecast_periods(lat: float, lon: float, http) -> Optional[list
     return periods
 
 
+async def _fetch_forecast_hourly_periods(lat: float, lon: float, http) -> Optional[list]:
+    """Fetch NWS hourly forecast periods list; returns None on any failure.
+
+    Mirrors _fetch_forecast_periods but reads properties.forecastHourly
+    instead of properties.forecast, caching under its own (hourly) URL key
+    in the same _forecast_cache dict.
+    """
+    points_url = f"https://api.weather.gov/points/{lat},{lon}"
+    points_data = await _nws_get(points_url, http)
+    if not points_data:
+        return None
+    hourly_url = (points_data.get("properties") or {}).get("forecastHourly")
+    if not hourly_url:
+        logger.debug("[weather] no hourly forecast URL for %s,%s", lat, lon)
+        return None
+
+    now = _time.monotonic()
+    cached = _forecast_cache.get(hourly_url)
+    if cached is not None:
+        fetched_at, periods = cached
+        if now - fetched_at < _CACHE_TTL_SECONDS:
+            return periods
+
+    hourly_data = await _nws_get(hourly_url, http)
+    if not hourly_data:
+        return None
+    periods = (hourly_data.get("properties") or {}).get("periods") or []
+    _forecast_cache[hourly_url] = (now, periods)
+    return periods
+
+
 def _period_temp_for_date(periods: list, target_date: date) -> Optional[float]:
     """Return temperature (degF) of the isDaytime=True period on target_date."""
     target_str = target_date.isoformat()
@@ -356,6 +398,41 @@ async def forecast_high(
     if periods is None:
         return None
     return _period_temp_for_date(periods, target_date)
+
+
+async def forecast_hour(
+    series: str,
+    iso_hour: str,
+    *,
+    http,
+) -> Optional[float]:
+    """Return NWS hourly forecast temperature (degF) for a confirmed hourly
+    series at iso_hour ("YYYY-MM-DDTHH").
+
+    Returns None (never raises) when:
+    - series is not in HOURLY_SERIES_STATION (unconfirmed station).
+    - iso_hour is beyond the NWS hourly forecast horizon.
+    - Any HTTP error occurs (network, NWS outage, rate-limit, etc.).
+    - No hourly period matching iso_hour exists in the forecast.
+    """
+    station = HOURLY_SERIES_STATION.get(series)
+    if station is None:
+        logger.debug("[weather] %s not in HOURLY_SERIES_STATION", series)
+        return None
+
+    try:
+        periods = await _fetch_forecast_hourly_periods(station.lat, station.lon, http)
+        if periods is None:
+            return None
+        for period in periods:
+            if period.get("startTime", "").startswith(iso_hour):
+                temp = period.get("temperature")
+                if temp is not None:
+                    return float(temp)
+        return None
+    except Exception as exc:
+        logger.warning("[weather] unexpected hourly fetch error for %s: %s", series, exc)
+        return None
 
 
 def forecast_margin(fc: float, threshold: float) -> float:
