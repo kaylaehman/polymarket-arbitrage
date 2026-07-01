@@ -12,7 +12,8 @@ Live mode:
   4. Records a DirectionalPosition with mode="live".
 
 Maker (maker_longshot strategy):
-  Paper: records position at post_price immediately (status="open", simulated fill).
+  Paper: Kalshi orders record PENDING (tracker fills them from the real Kalshi
+         orderbook); non-Kalshi (pmus:/pm:) record OPEN at post_price immediately.
   Live: places a resting (non-marketable) NO BUY limit; records PENDING position
         with the returned order_id (status="pending"). Tracker polls for fill/TTL.
 
@@ -137,11 +138,19 @@ class Executor:
     ) -> Optional[DirectionalPosition]:
         """Handle maker_longshot order placement.
 
-        Paper: record position as immediately open at post_price (simulated fill).
+        Paper: Kalshi orders record as PENDING — the tracker fills them realistically
+               from the Kalshi orderbook. Non-Kalshi (PM.US ``pmus:``, Polymarket
+               ``pm:``) orders can't be checked against the Kalshi book, so they record
+               immediately OPEN at post_price (prior behavior) rather than being
+               stranded pending forever.
         Live:  balance-check, place resting NO BUY limit, record PENDING with order_id.
         """
         if mode == "paper":
-            return self._record(order, mode, stop_loss, take_profit, status="open")
+            # Only Kalshi maker orders get the realistic pending->fill model (C1):
+            # the tracker's paper-fill reads the Kalshi orderbook, which returns None
+            # for a stripped pmus:/pm: slug and would force those to "unfilled".
+            status = "pending" if order.market_id.startswith("kalshi:") else "open"
+            return self._record(order, mode, stop_loss, take_profit, status=status)
 
         # Live: pre-flight balance guard
         bal = await self._client.get_balance()

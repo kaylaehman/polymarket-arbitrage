@@ -27,19 +27,23 @@ def make_candidates(parsed: ParsedClimate, market_price: float, signal: ClimateS
             reasoning=reasoning,
         )
 
-    # Directional: model diverges from the market YES price by >= min_edge — but
-    # ONLY in a sane price band. At extreme prices (yes < 0.05 or > 0.95) a large
-    # divergence is almost always model error, not edge: a liquid market pricing an
-    # outcome at 1.5% is usually right, and a model claiming a 70-point edge there
-    # is overconfident (e.g. too-wide forecast sigma). The deliberate tail bet is
-    # the longshot-NO path below; directional stays in the middle of the book.
-    if 0.05 <= yes <= 0.95:
-        if p - yes >= min_edge:
-            add("YES", f"model p={p:.2f} > price {yes:.2f} ({signal.source})")
-        elif yes - p >= min_edge:
-            add("NO", f"model p={p:.2f} < price {yes:.2f} ({signal.source})")
+    # Trade ONLY inside a sane price band. At extreme prices (yes < 0.05 or > 0.95)
+    # two bad things happen: (1) a large model-vs-market divergence there is almost
+    # always model error (a liquid market pricing an outcome at 1.5% is usually right,
+    # and a model claiming a 70-point edge is overconfident), and (2) sizing explodes
+    # because the decider buys notional/price contracts — a NO at a 2¢ cost is
+    # hundreds of contracts. Gate BOTH the directional and longshot-NO paths on the
+    # band so no climate bet is ever placed at a pathological price.
+    if not (0.05 <= yes <= 0.95):
+        return []
 
-    # Longshot-NO: YES is very unlikely.
+    # Directional: model diverges from the market YES price by >= min_edge.
+    if p - yes >= min_edge:
+        add("YES", f"model p={p:.2f} > price {yes:.2f} ({signal.source})")
+    elif yes - p >= min_edge:
+        add("NO", f"model p={p:.2f} < price {yes:.2f} ({signal.source})")
+
+    # Longshot-NO: YES is very unlikely (still inside the price band).
     if p <= longshot_floor:
         add("NO", f"longshot: p(YES)={p:.3f} <= {longshot_floor}")
 

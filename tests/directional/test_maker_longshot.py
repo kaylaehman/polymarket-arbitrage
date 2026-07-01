@@ -275,12 +275,13 @@ def maker_order(price=0.93, strategy="maker_longshot") -> DirectionalOrder:
 
 @pytest.mark.asyncio
 async def test_executor_paper_records_no_api():
-    """Paper maker: position recorded at post_price; no API call."""
+    """Paper maker: position recorded at post_price as pending (realistic fill
+    modeling); no API call. Tracker later fills/expires it against the real book."""
     store, client = FakeStore(), FakeKalshiClient()
     pos = await Executor(client, store).place(maker_order(), mode="paper")
 
     assert pos is not None
-    assert pos.status == "open"
+    assert pos.status == "pending"
     assert pos.strategy == "maker_longshot"
     assert abs(pos.entry_price - 0.93) < 1e-9
     assert client.place_calls == []
@@ -800,11 +801,13 @@ async def test_engine_run_once_paper_records_maker_position():
 
     await engine.run_once()
 
-    positions = engine.store.open_positions()
+    # Paper maker_longshot positions now start "pending" (realistic fill modeling),
+    # so they live in pending_positions(), not open_positions().
+    positions = engine.store.open_positions() + engine.store.pending_positions()
     maker_positions = [p for p in positions if p.strategy == "maker_longshot"]
     assert len(maker_positions) >= 1, f"Expected at least one maker_longshot position, got: {[p.strategy for p in positions]}"
     assert maker_positions[0].mode == "paper"
-    assert maker_positions[0].status == "open"
+    assert maker_positions[0].status == "pending"
     assert client.place_order_calls == [], "paper mode must not call place_order"
 
 

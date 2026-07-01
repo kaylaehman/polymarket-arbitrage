@@ -331,7 +331,9 @@ async def test_engine_maker_uses_last_liquid_not_capped_list():
     engine = DirectionalEngine(cfg, client, FakeIntelligenceEngine(), FakeRiskManager())
     await engine.run_once()
 
-    positions = engine.store.open_positions()
+    # Paper maker_longshot positions now start "pending" (realistic fill modeling),
+    # so they live in pending_positions(), not open_positions().
+    positions = engine.store.open_positions() + engine.store.pending_positions()
     maker_positions = [p for p in positions if p.strategy == "maker_longshot"]
     assert len(maker_positions) >= 1, (
         f"Expected at least 1 maker_longshot position for near-term longshot; "
@@ -443,11 +445,13 @@ async def test_run_once_skips_duplicate_market_same_strategy():
     # Run one scan cycle
     await engine.run_once()
 
-    open_positions = engine.store.open_positions()
+    # Paper maker_longshot positions now start "pending" (realistic fill modeling),
+    # so the freshly-created position lives in pending_positions(), not open_positions().
+    all_positions = engine.store.open_positions() + engine.store.pending_positions()
 
     # Count positions per market_id
-    dup_positions = [p for p in open_positions if p.market_id == DUP_MARKET_ID]
-    new_positions = [p for p in open_positions if p.market_id == NEW_MARKET_ID]
+    dup_positions = [p for p in all_positions if p.market_id == DUP_MARKET_ID]
+    new_positions = [p for p in all_positions if p.market_id == NEW_MARKET_ID]
 
     assert len(dup_positions) == 1, (
         f"Expected exactly 1 position for {DUP_MARKET_ID} (dedup must prevent stacking); "

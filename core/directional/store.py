@@ -442,6 +442,65 @@ class DirectionalStore:
             "open_notional": round(float(row["open_notional"]), 4),
         }
 
+    def maker_fill_stats(self, strategy: str = "maker_longshot") -> dict:
+        """Fill-rate report for maker positions of a given strategy.
+
+        Returns a dict with:
+          - pending: count of resting (never filled) positions
+          - filled_open: count of filled, currently-held positions (status='open')
+          - filled_settled: count of filled and resolved positions (status='closed')
+          - unfilled: count of positions that never filled (status='unfilled')
+          - fill_rate: (filled_open + filled_settled) / (filled_open + filled_settled + unfilled),
+                      or None if denominator is 0
+          - win_rate_filled: wins / filled_settled among closed positions,
+                            or None if filled_settled is 0
+                            (win = realized_pnl > 0)
+        """
+        row = self._conn.execute(
+            """SELECT
+                COUNT(*) FILTER (WHERE status = 'pending') AS pending,
+                COUNT(*) FILTER (WHERE status = 'open') AS filled_open,
+                COUNT(*) FILTER (WHERE status = 'closed') AS filled_settled,
+                COUNT(*) FILTER (WHERE status = 'unfilled') AS unfilled,
+                COUNT(*) FILTER (WHERE status = 'closed' AND realized_pnl > 0) AS wins
+               FROM directional_positions
+               WHERE strategy = ?""",
+            (strategy,),
+        ).fetchone()
+
+        if row is None:
+            return {
+                "pending": 0,
+                "filled_open": 0,
+                "filled_settled": 0,
+                "unfilled": 0,
+                "fill_rate": None,
+                "win_rate_filled": None,
+            }
+
+        pending = row["pending"]
+        filled_open = row["filled_open"]
+        filled_settled = row["filled_settled"]
+        unfilled = row["unfilled"]
+        wins = row["wins"]
+
+        # fill_rate = (open + closed) / (open + closed + unfilled)
+        filled = filled_open + filled_settled
+        denominator = filled + unfilled
+        fill_rate = (filled / denominator) if denominator > 0 else None
+
+        # win_rate_filled = wins / filled_settled
+        win_rate_filled = (wins / filled_settled) if filled_settled > 0 else None
+
+        return {
+            "pending": pending,
+            "filled_open": filled_open,
+            "filled_settled": filled_settled,
+            "unfilled": unfilled,
+            "fill_rate": fill_rate,
+            "win_rate_filled": win_rate_filled,
+        }
+
 
 def _row_to_position(row: sqlite3.Row) -> DirectionalPosition:
     """Convert a DB row to a DirectionalPosition."""
