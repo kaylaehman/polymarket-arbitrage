@@ -391,6 +391,17 @@ class ConsensusDivergenceCfg:
 
 
 @dataclass
+class ClimateCfg:
+    """Climate-markets directional strategy (Kalshi 'Climate and Weather'). PAPER only."""
+    enabled: bool = False
+    mode: str = "paper"          # placed under this; never live
+    longshot_floor: float = 0.05
+    min_edge: float = 0.10
+    high_temp_enabled: bool = False
+    hourly_temp_enabled: bool = False
+
+
+@dataclass
 class MusicPaperCfg:
     """Config for the MusicPaperStrategy — routes music_intel chart-edge signals
     into the paper book. PAPER only; never trades."""
@@ -436,6 +447,7 @@ class DirectionalConfig:
     consensus_divergence: ConsensusDivergenceCfg = field(default_factory=ConsensusDivergenceCfg)
     music_paper: MusicPaperCfg = field(default_factory=MusicPaperCfg)
     artist_paper: ArtistPaperCfg = field(default_factory=ArtistPaperCfg)
+    climate: ClimateCfg = field(default_factory=ClimateCfg)
 
 
 @dataclass
@@ -617,7 +629,8 @@ def _build_directional(data: dict) -> DirectionalConfig:
     consensus_divergence = _build_dataclass(ConsensusDivergenceCfg, data.get("consensus_divergence", {}) or {})
     music_paper = _build_dataclass(MusicPaperCfg, data.get("music_paper", {}) or {})
     artist_paper = _build_dataclass(ArtistPaperCfg, data.get("artist_paper", {}) or {})
-    _sub = ("caps", "safe_compounder", "ai_directional", "maker_longshot", "scanner", "weather", "financial", "pmus_weather", "macro", "sports", "consensus_divergence", "music_paper", "artist_paper")
+    climate = _build_dataclass(ClimateCfg, data.get("climate", {}) or {})
+    _sub = ("caps", "safe_compounder", "ai_directional", "maker_longshot", "scanner", "weather", "financial", "pmus_weather", "macro", "sports", "consensus_divergence", "music_paper", "artist_paper", "climate")
     top = {k: v for k, v in data.items() if k not in _sub}
     return _build_dataclass(DirectionalConfig, {
         **top,
@@ -634,6 +647,7 @@ def _build_directional(data: dict) -> DirectionalConfig:
         "consensus_divergence": consensus_divergence,
         "music_paper": music_paper,
         "artist_paper": artist_paper,
+        "climate": climate,
     })
 
 
