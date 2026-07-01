@@ -43,3 +43,14 @@ def test_yes_candidate_priced_at_yes_cost():
     c = make_candidates(_p(), market_price=0.30, signal=ClimateSignal(0.70, 0.8, "nws"))
     yes = [x for x in c if x.side == "YES"][0]
     assert yes.market_price == pytest.approx(0.30)
+
+
+def test_no_directional_at_extreme_price():
+    """Directional is suppressed at extreme prices (model-error zone); only the
+    longshot-NO tail may fire there."""
+    # yes=0.015, model p=0.60 -> would be a huge YES 'edge' but price is extreme.
+    c = make_candidates(_p(), market_price=0.015, signal=ClimateSignal(0.60, 0.7, "nws"))
+    assert all(x.side != "YES" for x in c)   # no directional YES at yes<0.05
+    # A mid-book divergence still fires directionally.
+    c2 = make_candidates(_p(), market_price=0.30, signal=ClimateSignal(0.70, 0.8, "nws"))
+    assert any(x.side == "YES" for x in c2)
