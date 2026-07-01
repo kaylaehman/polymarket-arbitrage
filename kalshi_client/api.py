@@ -849,6 +849,9 @@ class KalshiClient:
                 open_interest=data.get("open_interest", 0),
                 close_time=close_time,
                 category=data.get("category", ""),
+                strike_type=data.get("strike_type"),
+                floor_strike=(float(data["floor_strike"]) if data.get("floor_strike") is not None else None),
+                cap_strike=(float(data["cap_strike"]) if data.get("cap_strike") is not None else None),
             )
         except Exception as e:
             logger.warning(f"Failed to parse Kalshi market: {e}")
